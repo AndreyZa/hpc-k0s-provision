@@ -1,10 +1,10 @@
 ---
-- name: perf_event_paranoid навсегда (sysctl.d)
+- name: Записать perf_event_paranoid навсегда (sysctl.d)
   ansible.builtin.template:
     src: 99-perf.conf.j2
     dest: /etc/sysctl.d/99-perf.conf
     mode: "0644"
-  notify: reload sysctl
+  notify: Reload sysctl
 
 - name: Применить paranoid сейчас (не ждать ребута)
   ansible.posix.sysctl:
@@ -14,28 +14,30 @@
     state: present
     reload: true
 
-- name: PSI (io.pressure) присутствует — нужен для IO-оси
+- name: Проверить наличие PSI (io.pressure) — нужен для IO-оси
   ansible.builtin.stat:
     path: /sys/fs/cgroup/io.pressure
-  register: psi
+  register: perf_psi
 
-- name: Проверить PSI
+- name: Убедиться, что PSI включён
   ansible.builtin.assert:
-    that: psi.stat.exists
+    that: perf_psi.stat.exists
     fail_msg: >-
       PSI выключен — IO-ось будет нулевой. На Ubuntu включён по умолчанию;
       иначе boot-параметр psi=1 (docs «Ввод §5»)
     quiet: true
 
 # --- Только bench-узлы: фиксируем governor для стабильности измерений ---
-- name: Governor = {{ bench_cpu_governor }} на bench-узлах (стабильность makespan)
-  ansible.builtin.shell: "cpupower frequency-set -g {{ bench_cpu_governor }}"
-  register: governor
-  changed_when: "governor.rc == 0"
+- name: Зафиксировать CPU governor на bench-узлах (стабильность makespan)
+  ansible.builtin.command: "cpupower frequency-set -g {{ bench_cpu_governor }}"
+  register: perf_governor
+  changed_when: "perf_governor.rc == 0"
   failed_when: false   # best-effort: где cpufreq недоступен — не валим прогон
   when: inventory_hostname in groups['bench']
 
-- name: Governor — результат (bench)
+- name: Показать результат governor (bench)
   ansible.builtin.debug:
-    msg: "{{ inventory_hostname }}: cpupower rc={{ governor.rc }} ({{ 'ok' if governor.rc == 0 else 'cpufreq недоступен — пропущено' }})"
+    msg: >-
+      {{ inventory_hostname }}: cpupower rc={{ perf_governor.rc }}
+      ({{ 'ok' if perf_governor.rc == 0 else 'cpufreq недоступен — пропущено' }})
   when: inventory_hostname in groups['bench']

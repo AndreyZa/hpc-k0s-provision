@@ -19,7 +19,7 @@
         dest: "{{ playbook_dir }}/../k0sctl.yaml"
         mode: "0644"
 
-    - name: k0sctl apply (идемпотентно)
+    - name: Применить k0sctl (идемпотентно)
       ansible.builtin.command: k0sctl apply --config {{ playbook_dir }}/../k0sctl.yaml
       changed_when: true
 

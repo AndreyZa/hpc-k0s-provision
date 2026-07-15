@@ -36,13 +36,13 @@
     regexp: '^([^#].*\sswap\s.*)$'
     replace: '# \1'
 
-- name: cgroup v2 (unified) активен
+- name: Проверить наличие cgroup v2 (unified)
   ansible.builtin.stat:
     path: /sys/fs/cgroup/cgroup.controllers
-  register: cgroup_v2
+  register: common_cgroup_v2
 
-- name: Проверить cgroup v2
+- name: Убедиться, что cgroup v2 активен
   ansible.builtin.assert:
-    that: cgroup_v2.stat.exists
+    that: common_cgroup_v2.stat.exists
     fail_msg: "cgroup v2 (unified) не активен — агент рассчитан на неё (§5)"
     quiet: true
