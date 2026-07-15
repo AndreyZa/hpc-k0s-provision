@@ -40,4 +40,6 @@
     msg: >-
       {{ inventory_hostname }}: cpupower rc={{ perf_governor.rc }}
       ({{ 'ok' if perf_governor.rc == 0 else 'cpufreq недоступен — пропущено' }})
-  when: inventory_hostname in groups['bench']
+  when:
+    - inventory_hostname in groups['bench']
+    - perf_governor is defined   # в --check governor-команда пропущена -> переменной нет
