@@ -1,0 +1,13 @@
+---
+# Версия k0s (совпадает со STAGE; >=1.35 нужно для config D / slurm-bridge).
+k0s_version: "v1.35.6+k0s.0"
+
+# SSH-ключ, которым k0sctl и ansible ходят на узлы.
+ssh_key_path: "~/.ssh/id_ed25519"
+
+# Ядро/perf. paranoid=1 — рекомендация стенда (cgroup-scoped perf + CAP_PERFMON
+# у агента); ужесточение до 3 потребует CAP_SYS_ADMIN. См. docs «Ввод §5».
+perf_event_paranoid: 1
+
+# CPU governor на bench-узлах — performance для стабильности makespan.
+bench_cpu_governor: performance

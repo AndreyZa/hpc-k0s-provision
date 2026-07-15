@@ -1,0 +1,7 @@
+---
+- name: OS-подготовка узлов стенда
+  hosts: all
+  become: true
+  roles:
+    - common   # пакеты, swap off, время, cgroup v2
+    - perf     # perf_event_paranoid, PSI-проверка, governor на bench

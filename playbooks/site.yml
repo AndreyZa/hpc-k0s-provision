@@ -1,0 +1,6 @@
+---
+# Полный провижнинг. То же, что `make provision`, но без хендоффа в bench-репу
+# (testbed-деплой — отдельной командой `make testbed`, см. README).
+- import_playbook: prep.yml
+- import_playbook: cluster.yml
+- import_playbook: check.yml

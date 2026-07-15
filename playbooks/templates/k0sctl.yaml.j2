@@ -1,0 +1,25 @@
+# СГЕНЕРИРОВАНО из inventory (playbooks/cluster.yml) — правьте inventory, не этот файл.
+apiVersion: k0sctl.k0sproject.io/v1beta1
+kind: Cluster
+metadata:
+  name: sensitivityscore-prod
+spec:
+  k0s:
+    version: "{{ k0s_version }}"
+  hosts:
+{% for h in groups['controllers'] %}
+    # {{ h }} — control-plane (без kubelet, etcd-кворум)
+    - role: controller
+      ssh:
+        address: {{ hostvars[h].ansible_host }}
+        user: {{ hostvars[h].ansible_user | default('ubuntu') }}
+        keyPath: {{ ssh_key_path }}
+{% endfor %}
+{% for h in groups['workers'] %}
+    # {{ h }} — worker
+    - role: worker
+      ssh:
+        address: {{ hostvars[h].ansible_host }}
+        user: {{ hostvars[h].ansible_user | default('ubuntu') }}
+        keyPath: {{ ssh_key_path }}
+{% endfor %}

@@ -1,0 +1,39 @@
+---
+# Рендерит k0sctl.yaml из inventory и поднимает k0s одной командой с этого хоста.
+# controllers -> role: controller (только control-plane, kubelet нет -> etcd чист);
+# workers (ss_system + bench) -> role: worker.
+- name: Bootstrap k0s (HA control-plane + workers)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - ../inventory/group_vars/all.yml
+  tasks:
+    - name: Проверить наличие k0sctl
+      ansible.builtin.command: k0sctl version
+      changed_when: false
+
+    - name: Сгенерировать k0sctl.yaml из inventory
+      ansible.builtin.template:
+        src: templates/k0sctl.yaml.j2
+        dest: "{{ playbook_dir }}/../k0sctl.yaml"
+        mode: "0644"
+
+    - name: k0sctl apply (идемпотентно)
+      ansible.builtin.command: k0sctl apply --config {{ playbook_dir }}/../k0sctl.yaml
+      changed_when: true
+
+    - name: Забрать kubeconfig
+      ansible.builtin.command: k0sctl kubeconfig --config {{ playbook_dir }}/../k0sctl.yaml
+      register: kubeconfig_out
+      changed_when: false
+
+    - name: Записать ./kubeconfig
+      ansible.builtin.copy:
+        content: "{{ kubeconfig_out.stdout }}"
+        dest: "{{ playbook_dir }}/../kubeconfig"
+        mode: "0600"
+
+    - name: Куда положен kubeconfig
+      ansible.builtin.debug:
+        msg: "kubeconfig -> {{ playbook_dir }}/../kubeconfig (KUBECONFIG=... для kubectl/make testbed)"

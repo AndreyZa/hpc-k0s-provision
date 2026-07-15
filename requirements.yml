@@ -1,0 +1,4 @@
+---
+collections:
+  - name: ansible.posix       # sysctl, replace-in-fstab helpers
+  - name: community.general

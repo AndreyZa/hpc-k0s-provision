@@ -1,0 +1,33 @@
+---
+- name: Пост-проверки узлов
+  hosts: all
+  become: true
+  gather_facts: false
+  tasks:
+    - name: perf_event_paranoid
+      ansible.builtin.command: cat /proc/sys/kernel/perf_event_paranoid
+      register: paranoid
+      changed_when: false
+
+    - name: PSI io.pressure присутствует
+      ansible.builtin.stat:
+        path: /sys/fs/cgroup/io.pressure
+      register: psi
+
+    - name: Сводка по узлу
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }}: paranoid={{ paranoid.stdout }}, PSI={{ psi.stat.exists }}"
+
+- name: Кластер Ready
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: kubectl get nodes
+      ansible.builtin.command: kubectl --kubeconfig {{ playbook_dir }}/../kubeconfig get nodes -o wide
+      register: nodes
+      changed_when: false
+
+    - name: Узлы
+      ansible.builtin.debug:
+        var: nodes.stdout_lines

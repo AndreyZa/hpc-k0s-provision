@@ -1,0 +1,48 @@
+---
+- name: ОС — Ubuntu (рекомендация стенда — 24.04 LTS)
+  ansible.builtin.assert:
+    that: ansible_distribution == "Ubuntu"
+    fail_msg: >-
+      Ожидается Ubuntu 24.04 LTS (docs «Ввод прод-стенда» §5);
+      найдено {{ ansible_distribution }} {{ ansible_distribution_version }}
+    quiet: true
+
+- name: Базовые пакеты (+ perf для этого ядра)
+  ansible.builtin.apt:
+    name:
+      - chrony
+      - numactl
+      - hwloc
+      - curl
+      - ca-certificates
+      - linux-tools-common
+      - "linux-tools-{{ ansible_kernel }}"
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Синхронизация времени (chrony) — критично для makespan-таймстемпов
+  ansible.builtin.service:
+    name: chrony
+    state: started
+    enabled: true
+
+- name: Выключить swap сейчас (требование kubelet)
+  ansible.builtin.command: swapoff -a
+  changed_when: false
+
+- name: Убрать swap из /etc/fstab (не подключать после ребута)
+  ansible.builtin.replace:
+    path: /etc/fstab
+    regexp: '^([^#].*\sswap\s.*)$'
+    replace: '# \1'
+
+- name: cgroup v2 (unified) активен
+  ansible.builtin.stat:
+    path: /sys/fs/cgroup/cgroup.controllers
+  register: cgroup_v2
+
+- name: Проверить cgroup v2
+  ansible.builtin.assert:
+    that: cgroup_v2.stat.exists
+    fail_msg: "cgroup v2 (unified) не активен — агент рассчитан на неё (§5)"
+    quiet: true

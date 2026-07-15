@@ -1,0 +1,11 @@
+# generated at provision time
+kubeconfig
+k0sctl.yaml
+
+# ansible / secrets
+*.retry
+*.log
+.vault_pass
+vault.yml
+__pycache__/
+*.pyc
