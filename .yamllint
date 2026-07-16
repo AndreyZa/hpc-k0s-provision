@@ -8,6 +8,8 @@ rules:
   comments:
     min-spaces-from-content: 1
   comments-indentation: false
+  truthy:
+    check-keys: false   # ключ `on:` в GitHub workflow
   octal-values:
     forbid-implicit-octal: true
     forbid-explicit-octal: true

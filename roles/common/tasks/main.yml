@@ -1,5 +1,5 @@
 ---
-- name: ОС — Ubuntu (рекомендация стенда — 24.04 LTS)
+- name: Убедиться, что ОС — Ubuntu (рекомендация стенда — 24.04 LTS)
   ansible.builtin.assert:
     that: ansible_distribution == "Ubuntu"
     fail_msg: >-
@@ -7,7 +7,34 @@
       найдено {{ ansible_distribution }} {{ ansible_distribution_version }}
     quiet: true
 
-- name: Базовые пакеты (+ perf для этого ядра)
+- name: Проверить уникальность machine-id (ловит ВМ, клонированные без sys-prep)
+  run_once: true
+  vars:
+    common_machine_ids: >-
+      {{ ansible_play_hosts | map('extract', hostvars, 'ansible_machine_id') | select('defined') | list }}
+  ansible.builtin.assert:
+    that: common_machine_ids | length == common_machine_ids | unique | length
+    fail_msg: >-
+      Одинаковый /etc/machine-id на нескольких узлах — ВМ клонированы без
+      sys-prep (ломает DHCP-идентичность). На дублях:
+      rm /etc/machine-id && systemd-machine-id-setup && reboot
+    quiet: true
+
+# Имя узла k8s = hostname; testbed адресует ss-system по имени из инвентаря,
+# поэтому hostname приводится к inventory_hostname (отключаемо: manage_hostname).
+- name: Установить hostname из инвентаря
+  ansible.builtin.hostname:
+    name: "{{ inventory_hostname }}"
+  when: manage_hostname
+
+- name: Прописать hostname в /etc/hosts (иначе sudo ругается на resolve)
+  ansible.builtin.lineinfile:
+    path: /etc/hosts
+    regexp: '^127\.0\.1\.1\s'
+    line: "127.0.1.1 {{ inventory_hostname }}"
+  when: manage_hostname
+
+- name: Установить базовые пакеты (+ perf для текущего ядра)
   ansible.builtin.apt:
     name:
       - chrony
@@ -20,7 +47,7 @@
     update_cache: true
     cache_valid_time: 3600
 
-- name: Синхронизация времени (chrony) — критично для makespan-таймстемпов
+- name: Включить синхронизацию времени (chrony) — критично для makespan-таймстемпов
   ansible.builtin.service:
     name: chrony
     state: started
@@ -30,7 +57,7 @@
   ansible.builtin.command: swapoff -a
   changed_when: false
 
-- name: Убрать swap из /etc/fstab (не подключать после ребута)
+- name: Убрать swap из /etc/fstab (не возвращать после ребута)
   ansible.builtin.replace:
     path: /etc/fstab
     regexp: '^([^#].*\sswap\s.*)$'
@@ -46,3 +73,65 @@
     that: common_cgroup_v2.stat.exists
     fail_msg: "cgroup v2 (unified) не активен — агент рассчитан на неё (§5)"
     quiet: true
+
+# --- Ядро и sysctl под k8s (kube-router) ---
+
+- name: Прописать модули ядра k8s в modules-load.d (переживает ребут)
+  ansible.builtin.template:
+    src: k8s-modules.conf.j2
+    dest: /etc/modules-load.d/k8s.conf
+    mode: "0644"
+
+- name: Загрузить модули ядра сейчас
+  community.general.modprobe:
+    name: "{{ item }}"
+    state: present
+  loop:
+    - overlay
+    - br_netfilter
+
+- name: Проверить, что bridge-sysctl доступен (br_netfilter загружен)
+  ansible.builtin.stat:
+    path: /proc/sys/net/bridge/bridge-nf-call-iptables
+  register: common_brnf
+
+- name: Выставить sysctl для k8s (персистентно + сразу)
+  ansible.posix.sysctl:
+    name: "{{ item.key }}"
+    value: "{{ item.value }}"
+    sysctl_file: /etc/sysctl.d/99-kubernetes.conf
+    sysctl_set: true
+    state: present
+  loop:
+    - { key: net.ipv4.ip_forward, value: "1" }
+    - { key: fs.inotify.max_user_instances, value: "1024" }
+    - { key: fs.inotify.max_user_watches, value: "1048576" }
+
+- name: Выставить bridge-sysctl (когда br_netfilter загружен)
+  ansible.posix.sysctl:
+    name: "{{ item }}"
+    value: "1"
+    sysctl_file: /etc/sysctl.d/99-kubernetes.conf
+    sysctl_set: true
+    state: present
+  loop:
+    - net.bridge.bridge-nf-call-iptables
+    - net.bridge.bridge-nf-call-ip6tables
+  when: common_brnf.stat.exists
+
+# --- Автообновления: apt-апгрейд посреди серии = испорченные измерения ---
+
+- name: Отключить периодические apt-задачи (APT::Periodic = 0)
+  ansible.builtin.template:
+    src: no-auto-upgrades.conf.j2
+    dest: /etc/apt/apt.conf.d/99-provision-no-auto.conf
+    mode: "0644"
+  when: disable_unattended_upgrades
+
+- name: Остановить и выключить unattended-upgrades
+  ansible.builtin.systemd_service:
+    name: unattended-upgrades.service
+    state: stopped
+    enabled: false
+  failed_when: false   # сервиса может не быть в минимальных образах
+  when: disable_unattended_upgrades

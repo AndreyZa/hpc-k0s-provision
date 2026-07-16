@@ -21,6 +21,18 @@ deps: ## установить ansible-коллекции (requirements.yml)
 ping: ## проверить SSH-доступность всех узлов
 	ansible -i $(INVENTORY) all -m ping
 
+.PHONY: lint
+lint: ## yamllint + ansible-lint + syntax-check всех плейбуков
+	yamllint .
+	ansible-lint
+	@for pb in playbooks/*.yml; do \
+		ansible-playbook --syntax-check $$pb >/dev/null && echo "syntax ok  $$pb"; \
+	done
+
+.PHONY: dry-run
+dry-run: ## prep в режиме --check --diff — показать, что изменилось бы, ничего не меняя
+	$(ANSIBLE) -i $(INVENTORY) playbooks/prep.yml --check --diff
+
 .PHONY: prep
 prep: ## OS-подготовка всех узлов (Ubuntu/perf/PSI/swap/время/governor)
 	$(ANSIBLE) -i $(INVENTORY) playbooks/prep.yml

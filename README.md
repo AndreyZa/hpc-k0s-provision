@@ -1,56 +1,100 @@
-# prod-provision
+# hpc-k0s-provision
 
 Провижнинг прод-стенда SensitivityScore **с одного хоста по кнопке**.
 Разворачивает k8s-кластер стенда с нуля и передаёт его в
-[`../sensitivityscore-hpc-bench`](../sensitivityscore-hpc-bench) для деплоя
-тестбеда (Redis, планировщик, metrics-agent).
+[`sensitivityscore-hpc-bench`](https://github.com/AndreyZa/sensitivityscore-hpc-bench)
+для деплоя тестбеда (Redis, планировщик, metrics-agent).
 
 ## Топология стенда
 
 | Группа | Узлы | Роль k8s | Железо |
 |--------|------|----------|--------|
-| `controllers` | cp1, cp2, cp3 | control-plane (HA etcd) | 3 ВМ · 4 vCPU / 8 ГБ / 100 ГБ SSD |
-| `ss_system` | sssystem | worker (role `ss-system` + taint) | 1 ВМ · 4 vCPU / 8 ГБ / 100 ГБ SSD |
-| `bench` | bench1–3 | worker (role `bench`) | 3× Dell R760, 2× Xeon Platinum 8462Y+, 384 ГБ |
+| `controllers` | cp1, cp2, cp3 | control-plane (HA etcd, без kubelet) | 3 ВМ · 4 vCPU / 8 ГБ / 100 ГБ SSD |
+| `ss_system` | sssystem | worker (роль `ss-system` + taint) | 1 ВМ · 4 vCPU / 8 ГБ / 100 ГБ SSD |
+| `bench` | bench1–3 | worker (роль `bench`) | 3× Dell R760, 2× Xeon Platinum 8462Y+, 384 ГБ |
 
 ВМ — на отдельном гипервизор-хосте, **не на R760** (иначе фоновая нагрузка
-etcd/ClickHouse исказит метрики). Подробности — `../sensitivityscore-hpc-bench/docs/Ввод прод-стенда (Этап 0).md`.
+etcd/ClickHouse исказит метрики). Диск CP-ВМ — SSD: etcd чувствителен к
+латентности fsync (`make check` включает пробу). Подробности — bench-репа,
+`docs/Ввод прод-стенда (Этап 0).md`.
 
 ## Стек
 
-- **Ansible** — подготовка ОС всех узлов (Ubuntu 24.04: `perf_event_paranoid`,
-  PSI, cgroup v2, swap off, время, CPU-governor на bench).
-- **k0sctl** — bootstrap кластера k0s (тот же дистрибутив, что на STAGE).
-  `k0sctl.yaml` **генерируется** из ansible-инвентаря (один источник истины).
+- **Ansible** — подготовка ОС всех узлов (см. «Что настраивает prep» ниже).
+- **k0sctl** — bootstrap кластера k0s (тот же дистрибутив, что на STAGE);
+  `k0sctl.yaml` **генерируется** из ansible-инвентаря (один источник истины),
+  телеметрия k0s выключена.
 - **Хендофф** — роли узлов + компоненты тестбеда через `make setup-cluster`
   bench-репы (логика не дублируется).
 
+## Что настраивает prep (все узлы, идемпотентно, переживает ребут)
+
+- **Идентичность узла**: hostname = имя в инвентаре (`manage_hostname`; имя
+  узла k8s берётся из hostname — на него завязан хендофф `SS_NODES=sssystem`),
+  запись в `/etc/hosts`; assert уникальности `/etc/machine-id` (ловит ВМ,
+  клонированные без sys-prep).
+- **Требования k8s/kubelet**: swap off (сейчас + fstab), модули `overlay`,
+  `br_netfilter` (modules-load.d), sysctl `ip_forward`, `bridge-nf-call-*`,
+  inotify-лимиты (sysctl.d), assert cgroup v2.
+- **Метрики стенда**: `perf_event_paranoid` (sysctl.d, значение из
+  `group_vars`), assert PSI (`io.pressure`), linux-tools под текущее ядро.
+- **Стабильность измерений**: chrony (время для makespan-таймстемпов),
+  автообновления apt выключены (`disable_unattended_upgrades` — апгрейд
+  посреди серии портит данные), на bench-узлах CPU governor = `performance`
+  (сейчас + systemd-юнит `cpupower-governor.service` на ребут, `ondemand.service`
+  отключён).
+
 ## Предпосылки (на хосте-операторе)
 
-- `ansible` (+ коллекции: `make deps`), `k0sctl`, `kubectl`, `make`.
-- SSH-ключ с доступом root/sudo на все 7 узлов (`ssh_key_path` в
-  `inventory/group_vars/all.yml`).
-- ОС на узлах — Ubuntu Server 24.04 LTS, уже установлена и доступна по SSH.
+- `ansible` (+ коллекции: `make deps`), `k0sctl`, `kubectl`, `make`;
+  для `make lint` — `ansible-lint`, `yamllint`.
+- SSH-ключ на все 7 узлов (`ssh_key_path` в `inventory/group_vars/all.yml`),
+  пользователь с **passwordless sudo** (нужен и Ansible, и k0sctl).
+- ОС на узлах — Ubuntu Server 24.04 LTS, установлена и доступна по SSH.
 
 ## Как пользоваться
 
-1. Заполнить `inventory/hosts.yml` (адреса, ssh-пользователь) и при необходимости
-   `inventory/group_vars/all.yml` (версия k0s, ключ, governor).
-2. Проверить доступность: `make ping`.
+1. Заполнить `inventory/hosts.yml` (адреса, ssh-пользователь), при
+   необходимости — `inventory/group_vars/all.yml` (версия k0s, ключ, тумблеры).
+2. Проверки перед прогоном:
+
+   ```bash
+   make lint      # yamllint + ansible-lint + syntax-check
+   make ping      # SSH-доступность всех узлов
+   make dry-run   # prep --check --diff: что изменилось бы, без изменений
+   ```
+
 3. Кнопка:
 
    ```bash
    make provision
    ```
 
-   Это: `prep` (OS) → `cluster` (k0s, пишет `./kubeconfig`) → `testbed`
-   (роли + Redis/scheduler/agent через bench-репу) → `check`.
+   Это: `prep` (ОС) → `cluster` (k0s, пишет `./kubeconfig`) → `testbed`
+   (роли + Redis/scheduler/agent через bench-репу) → `check` (paranoid, PSI,
+   swap, chrony, governor, fsync-проба etcd-диска, узлы Ready).
 
 Гранулярно — те же шаги по отдельности: `make prep`, `make cluster`,
 `make testbed`, `make check`. `make help` — список целей.
 
-После `make provision` кластер готов к прогонам: см. `../sensitivityscore-hpc-bench/README.md`
+После `make provision` кластер готов к прогонам: см. README bench-репы
 (калибровки Net/LLC, `make series`).
+
+## Переменные (`inventory/group_vars/all.yml`)
+
+| Переменная | Дефолт | Что делает |
+|---|---|---|
+| `k0s_version` | `v1.35.6+k0s.0` | версия k0s (та же, что на STAGE; ≥1.35 для config D) |
+| `ssh_key_path` | `~/.ssh/id_ed25519` | ключ для ansible и k0sctl |
+| `perf_event_paranoid` | `1` | значение sysctl (см. bench-репа, «Ввод §5») |
+| `bench_cpu_governor` | `performance` | governor bench-узлов (persist через systemd) |
+| `manage_hostname` | `true` | hostname = имя в инвентаре |
+| `disable_unattended_upgrades` | `true` | выключить фоновые apt-обновления |
+
+## CI
+
+GitHub Actions (`.github/workflows/lint.yml`): yamllint + ansible-lint
+(production-профиль) + syntax-check на каждый push/PR.
 
 ## Альтернативы стека
 

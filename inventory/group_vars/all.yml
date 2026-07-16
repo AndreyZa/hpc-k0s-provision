@@ -10,4 +10,13 @@ ssh_key_path: "~/.ssh/id_ed25519"
 perf_event_paranoid: 1
 
 # CPU governor на bench-узлах — performance для стабильности makespan.
+# Персистентно: systemd-юнит cpupower-governor.service (роль perf).
 bench_cpu_governor: performance
+
+# hostname узла = имя в инвентаре (cp1, sssystem, bench1…). Имя узла k8s
+# берётся из hostname, testbed адресует ss-system по нему. false — не трогать.
+manage_hostname: true
+
+# Выключить фоновые apt-обновления: апгрейд посреди серии портит измерения.
+# Обновлять вручную между сериями.
+disable_unattended_upgrades: true

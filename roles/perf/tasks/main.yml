@@ -27,13 +27,37 @@
       иначе boot-параметр psi=1 (docs «Ввод §5»)
     quiet: true
 
-# --- Только bench-узлы: фиксируем governor для стабильности измерений ---
-- name: Зафиксировать CPU governor на bench-узлах (стабильность makespan)
+# --- Только bench-узлы: фиксированный CPU governor (стабильность makespan) ---
+
+- name: Отключить ondemand.service (перебивал бы governor при загрузке)
+  ansible.builtin.systemd_service:
+    name: ondemand.service
+    enabled: false
+  failed_when: false   # юнита может не быть на современных Ubuntu
+  when: inventory_hostname in groups['bench'] | default([])
+
+- name: Установить systemd-юнит фиксации governor (переживает ребут)
+  ansible.builtin.template:
+    src: cpupower-governor.service.j2
+    dest: /etc/systemd/system/cpupower-governor.service
+    mode: "0644"
+  when: inventory_hostname in groups['bench'] | default([])
+
+- name: Включить юнит cpupower-governor
+  ansible.builtin.systemd_service:
+    name: cpupower-governor.service
+    enabled: true
+    daemon_reload: true
+  when:
+    - inventory_hostname in groups['bench'] | default([])
+    - not ansible_check_mode   # в --check юнит ещё не записан на диск
+
+- name: Применить governor сейчас (не ждать ребута)
   ansible.builtin.command: "cpupower frequency-set -g {{ bench_cpu_governor }}"
   register: perf_governor
   changed_when: "perf_governor.rc == 0"
   failed_when: false   # best-effort: где cpufreq недоступен — не валим прогон
-  when: inventory_hostname in groups['bench']
+  when: inventory_hostname in groups['bench'] | default([])
 
 - name: Показать результат governor (bench)
   ansible.builtin.debug:
@@ -41,5 +65,6 @@
       {{ inventory_hostname }}: cpupower rc={{ perf_governor.rc }}
       ({{ 'ok' if perf_governor.rc == 0 else 'cpufreq недоступен — пропущено' }})
   when:
-    - inventory_hostname in groups['bench']
-    - perf_governor is defined   # в --check governor-команда пропущена -> переменной нет
+    - inventory_hostname in groups['bench'] | default([])
+    - perf_governor.rc is defined
+    - not (perf_governor.skipped | default(false))   # в --check команда пропущена — rc=0 в skip-результате врал бы

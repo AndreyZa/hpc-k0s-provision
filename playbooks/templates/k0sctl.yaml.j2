@@ -6,6 +6,14 @@ metadata:
 spec:
   k0s:
     version: "{{ k0s_version }}"
+    config:
+      apiVersion: k0s.k0sproject.io/v1beta1
+      kind: ClusterConfig
+      metadata:
+        name: sensitivityscore-prod
+      spec:
+        telemetry:
+          enabled: false
   hosts:
 {% for h in groups['controllers'] %}
     # {{ h }} — control-plane (без kubelet, etcd-кворум)

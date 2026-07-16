@@ -10,26 +10,86 @@
       changed_when: false
       check_mode: false   # read-only: выполнять и в --check
 
-    - name: PSI io.pressure присутствует
+    - name: Проверить PSI io.pressure
       ansible.builtin.stat:
         path: /sys/fs/cgroup/io.pressure
       register: psi
 
+    - name: Прочитать активные swap-разделы
+      ansible.builtin.command: cat /proc/swaps
+      register: swaps
+      changed_when: false
+      check_mode: false
+
+    - name: Прочитать смещение времени (chrony)
+      ansible.builtin.command: chronyc -n tracking
+      register: chrony
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Прочитать текущий CPU governor (bench)
+      ansible.builtin.command: cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor
+      register: governor
+      changed_when: false
+      failed_when: false
+      check_mode: false
+      when: inventory_hostname in groups['bench'] | default([])
+
     - name: Сводка по узлу
       ansible.builtin.debug:
-        msg: "{{ inventory_hostname }}: paranoid={{ paranoid.stdout }}, PSI={{ psi.stat.exists }}"
+        msg:
+          - "paranoid = {{ paranoid.stdout }}"
+          - "PSI = {{ psi.stat.exists }}"
+          - "swap активен = {{ swaps.stdout_lines | length > 1 }}"
+          - "chrony: {{ chrony.stdout_lines | select('search', 'System time') | first | default('нет chrony (?)') }}"
+          - "governor: {{ governor.stdout | default('n/a (не bench)') }}"
 
-- name: Кластер Ready
+# Латентность fsync диска — узкое место etcd (нужен SSD, p99 < 10 мс).
+# Проба пишет и удаляет временный файл, в --check пропускается.
+- name: Проба диска под etcd (controllers)
+  hosts: controllers
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Записать 100×8КиБ с dsync (латентность fsync)
+      ansible.builtin.command:
+        cmd: dd if=/dev/zero of=/var/lib/.etcd-fsync-probe bs=8k count=100 oflag=dsync
+      register: ddprobe
+      changed_when: false
+
+    - name: Убрать файл пробы
+      ansible.builtin.file:
+        path: /var/lib/.etcd-fsync-probe
+        state: absent
+
+    - name: Результат пробы (ориентир — десятки MB/s на SSD; ~1 MB/s = HDD, etcd будет страдать)
+      ansible.builtin.debug:
+        msg: "{{ ddprobe.stderr_lines | last | default('n/a (--check)') }}"
+
+- name: Проверка кластера
   hosts: localhost
   connection: local
   gather_facts: false
   tasks:
+    - name: Проверить наличие kubeconfig
+      ansible.builtin.stat:
+        path: "{{ playbook_dir }}/../kubeconfig"
+      register: kc
+
     - name: Список узлов кластера
       ansible.builtin.command: kubectl --kubeconfig {{ playbook_dir }}/../kubeconfig get nodes -o wide
       register: nodes
       changed_when: false
-      check_mode: false   # read-only: выполнять и в --check
+      check_mode: false
+      when: kc.stat.exists
 
     - name: Узлы
       ansible.builtin.debug:
         var: nodes.stdout_lines
+      when: kc.stat.exists
+
+    - name: Кластер ещё не поднят
+      ansible.builtin.debug:
+        msg: "kubeconfig не найден — сначала make cluster"
+      when: not kc.stat.exists

@@ -1,0 +1,12 @@
+# Управляется prod-provision (роль perf): фиксирует CPU governor после ребута.
+[Unit]
+Description=Set CPU governor to {{ bench_cpu_governor }} (SensitivityScore bench)
+After=ondemand.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/cpupower frequency-set -g {{ bench_cpu_governor }}
+RemainAfterExit=true
+
+[Install]
+WantedBy=multi-user.target
