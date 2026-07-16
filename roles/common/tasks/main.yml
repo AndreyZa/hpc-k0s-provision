@@ -27,7 +27,7 @@
     name: "{{ inventory_hostname }}"
   when: manage_hostname
 
-- name: Прописать hostname в /etc/hosts (иначе sudo ругается на resolve)
+- name: Прописать hostname в /etc/hosts (иначе sudo предупреждает «unable to resolve host»)
   ansible.builtin.lineinfile:
     path: /etc/hosts
     regexp: '^127\.0\.1\.1\s'

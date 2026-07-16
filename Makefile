@@ -1,5 +1,5 @@
-# Провижнинг прод-стенда SensitivityScore «по кнопке» с одного хоста:
-# OS-prep (Ansible) -> k8s (k0sctl) -> тестбед (bench-репа) -> проверки.
+# Провижнинг прод-стенда SensitivityScore с одного хоста одной командой:
+# подготовка ОС (Ansible) -> k8s (k0sctl) -> тестбед (bench-репозиторий) -> проверки.
 
 ANSIBLE        ?= ansible-playbook
 INVENTORY      ?= inventory/hosts.yml
@@ -50,5 +50,5 @@ check: ## пост-проверки (paranoid, PSI, ноды Ready)
 	$(ANSIBLE) -i $(INVENTORY) playbooks/check.yml
 
 .PHONY: provision
-provision: prep cluster testbed check ## КНОПКА: от 0 до задеплоенного стенда
+provision: prep cluster testbed check ## полный цикл: подготовка ОС -> кластер -> тестбед -> проверки
 	@echo "OK — стенд поднят. kubeconfig: $(KUBECONFIG_OUT)"

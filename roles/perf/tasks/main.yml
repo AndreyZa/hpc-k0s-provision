@@ -56,7 +56,7 @@
   ansible.builtin.command: "cpupower frequency-set -g {{ bench_cpu_governor }}"
   register: perf_governor
   changed_when: "perf_governor.rc == 0"
-  failed_when: false   # best-effort: где cpufreq недоступен — не валим прогон
+  failed_when: false   # где cpufreq недоступен — не прерывать прогон
   when: inventory_hostname in groups['bench'] | default([])
 
 - name: Показать результат governor (bench)
@@ -67,4 +67,4 @@
   when:
     - inventory_hostname in groups['bench'] | default([])
     - perf_governor.rc is defined
-    - not (perf_governor.skipped | default(false))   # в --check команда пропущена — rc=0 в skip-результате врал бы
+    - not (perf_governor.skipped | default(false))   # в --check команда пропущена, но skip-результат содержит rc=0 — сообщение было бы недостоверным

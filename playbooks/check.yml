@@ -63,7 +63,7 @@
         path: /var/lib/.etcd-fsync-probe
         state: absent
 
-    - name: Результат пробы (ориентир — десятки MB/s на SSD; ~1 MB/s = HDD, etcd будет страдать)
+    - name: Результат пробы (ориентир — десятки MB/s на SSD; ~1 MB/s недостаточно для etcd)
       ansible.builtin.debug:
         msg: "{{ ddprobe.stderr_lines | last | default('n/a (--check)') }}"
 
