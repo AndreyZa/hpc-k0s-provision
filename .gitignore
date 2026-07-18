@@ -9,3 +9,4 @@ k0sctl.yaml
 vault.yml
 __pycache__/
 *.pyc
+.storageclass.yaml

@@ -20,3 +20,12 @@ manage_hostname: true
 # Выключить фоновые apt-обновления: апгрейд посреди серии портит измерения.
 # Обновлять вручную между сериями.
 disable_unattended_upgrades: true
+
+# Динамическое хранилище (playbooks/storage.yml). Нужен StorageClass ПО
+# УМОЛЧАНИЮ: манифесты стенда просят тома без storageClassName (ClickHouse),
+# и без дефолтного класса PVC зависает в Pending.
+local_path_version: "v0.0.36"
+# Каталог томов на узле — рядом с данными мониторинга
+# (/var/lib/sensitivityscore/{prometheus,grafana}), чтобы всё состояние
+# стенда лежало под одним путём.
+local_path_dir: "/var/lib/sensitivityscore/local-path"

@@ -89,6 +89,35 @@
         var: nodes.stdout_lines
       when: kc.stat.exists
 
+    # Без StorageClass ПО УМОЛЧАНИЮ манифесты, просящие том без
+    # storageClassName (ClickHouse), молча висят в Pending — отказ выглядит
+    # как «под не стартует», а не как «нет хранилища». Проверяем явно.
+    - name: Найти StorageClass по умолчанию
+      ansible.builtin.shell:
+        cmd: >-
+          set -o pipefail;
+          kubectl --kubeconfig {{ playbook_dir }}/../kubeconfig get storageclass -o json
+          | python3 -c 'import json,sys;
+          items=json.load(sys.stdin)["items"];
+          d=[i["metadata"]["name"] for i in items
+          if i["metadata"].get("annotations",{}).get("storageclass.kubernetes.io/is-default-class")=="true"];
+          print(",".join(d))'
+        executable: /bin/bash
+      register: default_sc
+      changed_when: false
+      failed_when: false
+      check_mode: false
+      when: kc.stat.exists
+
+    - name: StorageClass по умолчанию
+      ansible.builtin.debug:
+        msg: >-
+          {{ 'default StorageClass = ' + default_sc.stdout
+             if default_sc.stdout | default('') | length > 0
+             else 'НЕТ StorageClass по умолчанию — PVC без storageClassName (ClickHouse)
+                   зависнут в Pending; выполнить make storage' }}
+      when: kc.stat.exists
+
     - name: Кластер ещё не поднят
       ansible.builtin.debug:
         msg: "kubeconfig не найден — сначала make cluster"

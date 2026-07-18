@@ -45,10 +45,14 @@ cluster: ## поднять k0s HA-кластер и записать ./kubeconfi
 testbed: ## роли узлов + Redis/scheduler/agent (через bench-репу)
 	KUBECONFIG=$(KUBECONFIG_OUT) $(MAKE) -C $(BENCH_REPO) setup-cluster SS_NODES=$(SS_SYSTEM_NODE)
 
+.PHONY: storage
+storage: ## динамическое хранилище (local-path StorageClass по умолчанию)
+	$(ANSIBLE) -i $(INVENTORY) playbooks/storage.yml
+
 .PHONY: check
 check: ## пост-проверки (paranoid, PSI, ноды Ready)
 	$(ANSIBLE) -i $(INVENTORY) playbooks/check.yml
 
 .PHONY: provision
-provision: prep cluster testbed check ## полный цикл: подготовка ОС -> кластер -> тестбед -> проверки
+provision: prep cluster testbed storage check ## полный цикл: ОС -> кластер -> тестбед -> хранилище -> проверки
 	@echo "OK — стенд поднят. kubeconfig: $(KUBECONFIG_OUT)"

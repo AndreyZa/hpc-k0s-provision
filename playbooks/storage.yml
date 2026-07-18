@@ -1,0 +1,98 @@
+---
+# Динамическое хранилище кластера: local-path-provisioner.
+#
+# Зачем: манифесты стенда просят тома без storageClassName (например
+# ClickHouse, k8s/clickhouse/base/statefulset.yaml -> volumeClaimTemplates),
+# а такой PVC связывается только при наличии StorageClass ПО УМОЛЧАНИЮ. Без
+# него StatefulSet повиснет в Pending, и это единственное, чего не хватало
+# прод-стенду из хранилища.
+#
+# Почему local-path, а не OpenEBS: чистота измерений. local-path — это ровно
+# один Deployment и ни одного DaemonSet, его можно прибить к ss-system, и на
+# измерительных узлах не появляется ничего. Бандл OpenEBS 4.x тянет Mayastor
+# с DaemonSet'ами на все узлы, то есть постоянный посторонний процесс на
+# bench — ровно то, от чего стенд бережёт LLC/IO (bench-репа,
+# docs «Ввод прод-стенда (Этап 0)» §2). Встроенный в k0s
+# `spec.extensions.storage.type: openebs_local_storage` вдобавок объявлен
+# устаревшим в пользу helm-расширения.
+#
+# Оговорка: тома отдаёт узел, на котором встал ПОТРЕБИТЕЛЬ (SC работает в
+# режиме WaitForFirstConsumer), а создаёт каталог короткоживущий helper-под
+# на том же узле. Пока PVC просят только системные компоненты (они прибиты к
+# ss-system), на bench не запускается ничего. Если PVC попросит под серии —
+# helper на секунды появится на измерительном узле; для чистого прогона так
+# не делать.
+- name: Динамическое хранилище (local-path-provisioner)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - ../inventory/group_vars/all.yml
+  environment:
+    KUBECONFIG: "{{ playbook_dir }}/../kubeconfig"
+  tasks:
+    - name: Проверить наличие kubectl
+      ansible.builtin.command: kubectl version --client
+      changed_when: false
+
+    - name: Развернуть local-path-provisioner (закреплённая версия)
+      ansible.builtin.command: >-
+        kubectl apply -f
+        https://raw.githubusercontent.com/rancher/local-path-provisioner/{{ local_path_version }}/deploy/local-path-storage.yaml
+      changed_when: true
+
+    - name: Прибить провижинер к ss-system (на bench он не нужен)
+      ansible.builtin.command: >-
+        kubectl -n local-path-storage patch deployment local-path-provisioner -p
+        '{"spec":{"template":{"spec":{
+        "nodeSelector":{"node-role.kubernetes.io/ss-system":""},
+        "tolerations":[{"key":"node-role.kubernetes.io/ss-system","operator":"Exists","effect":"NoSchedule"}]}}}}'
+      changed_when: true
+
+    - name: Каталог томов — рядом с остальными данными стенда
+      ansible.builtin.command: >-
+        kubectl -n local-path-storage patch configmap local-path-config --type merge -p
+        '{"data":{"config.json":"{\"nodePathMap\":[{\"node\":\"DEFAULT_PATH_FOR_NON_LISTED_NODES\",\"paths\":[\"{{ local_path_dir }}\"]}]}"}}'
+      changed_when: true
+
+    # StorageClass пересоздаётся, а не патчится: reclaimPolicy — неизменяемое
+    # поле. Апстрим ставит Delete, и тогда удаление PVC (или неймспейса)
+    # уносит результаты серий вместе с томом. Для диссертационных данных
+    # нужен Retain: том переживает удаление PVC, чистить вручную.
+    - name: Убрать апстримный StorageClass
+      ansible.builtin.command: kubectl delete storageclass local-path --ignore-not-found
+      changed_when: true
+
+    - name: Создать StorageClass по умолчанию (Retain)
+      ansible.builtin.copy:
+        dest: "{{ playbook_dir }}/../.storageclass.yaml"
+        mode: "0644"
+        content: |
+          ---
+          apiVersion: storage.k8s.io/v1
+          kind: StorageClass
+          metadata:
+            name: local-path
+            annotations:
+              storageclass.kubernetes.io/is-default-class: "true"
+          provisioner: rancher.io/local-path
+          reclaimPolicy: Retain
+          volumeBindingMode: WaitForFirstConsumer
+
+    - name: Применить StorageClass
+      ansible.builtin.command: kubectl apply -f {{ playbook_dir }}/../.storageclass.yaml
+      changed_when: true
+
+    - name: Дождаться готовности провижинера
+      ansible.builtin.command: >-
+        kubectl -n local-path-storage rollout status deployment/local-path-provisioner --timeout=180s
+      changed_when: false
+
+    - name: Показать StorageClass
+      ansible.builtin.command: kubectl get storageclass
+      register: sc_out
+      changed_when: false
+
+    - name: Итог
+      ansible.builtin.debug:
+        msg: "{{ sc_out.stdout_lines }}"
