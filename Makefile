@@ -2,6 +2,7 @@
 # подготовка ОС (Ansible) -> k8s (k0sctl) -> тестбед (bench-репозиторий) -> проверки.
 
 ANSIBLE        ?= ansible-playbook
+PYTHON         ?= python3
 INVENTORY      ?= inventory/hosts.yml
 KUBECONFIG_OUT ?= $(CURDIR)/kubeconfig
 BENCH_REPO     ?= ../sensitivityscore-hpc-bench
@@ -12,42 +13,99 @@ SS_SYSTEM_NODE ?= sssystem
 # Коллекции берём из requirements.yml, чтобы список не разъезжался с deps.
 COLLECTIONS = $(shell awk '$$1=="-" && $$2=="name:" {print $$3}' requirements.yml)
 
+# Инструментарий ставим в репозиторий, а не в систему: версия k0sctl
+# фиксирована (воспроизводимость стенда), а python-пакет kubernetes ставить
+# в системный интерпретатор нельзя — на macOS и свежих Debian/Ubuntu он
+# externally-managed (PEP 668), pip туда откажет. Обе директории в .gitignore.
+VENV           ?= $(CURDIR)/.venv
+BIN            ?= $(CURDIR)/bin
+K0SCTL         ?= $(BIN)/k0sctl
+K0SCTL_VERSION ?= v0.32.1
+K0SCTL_OS      ?= $(shell uname -s | tr 'A-Z' 'a-z')
+K0SCTL_ARCH    ?= $(shell uname -m | sed 's/x86_64/amd64/; s/aarch64/arm64/')
+K0SCTL_URL      = https://github.com/k0sproject/k0sctl/releases/download/$(K0SCTL_VERSION)/k0sctl-$(K0SCTL_OS)-$(K0SCTL_ARCH)
+
+# Свой bin впереди PATH: cluster.yml зовёт k0sctl по имени, и брать надо
+# зафиксированную версию, а не случайную из системы.
+export PATH := $(BIN):$(PATH)
+
+# preflight по умолчанию доставляет недостающее. PREFLIGHT_INSTALL=0 —
+# только проверить и ничего не менять (CI, чужая машина).
+PREFLIGHT_INSTALL ?= 1
+
 .DEFAULT_GOAL := help
 
 .PHONY: help
 help: ## список целей
 	@grep -hE '^[a-zA-Z0-9_-]+:.*##' $(MAKEFILE_LIST) | sort | awk 'BEGIN{FS=":.*##"}{printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
 
+# Интерпретатор для модулей kubernetes.core задаётся в
+# inventory/host_vars/localhost.yml: эта .venv, если она есть, иначе прежний
+# python (значит пакет поставлен глобально — тоже рабочий вариант).
+$(K0SCTL):
+	@mkdir -p $(BIN)
+	@echo "качаю k0sctl $(K0SCTL_VERSION) ($(K0SCTL_OS)/$(K0SCTL_ARCH))"
+	@curl -fsSL -o $(K0SCTL) $(K0SCTL_URL) || { \
+		echo "не скачался: $(K0SCTL_URL)"; rm -f $(K0SCTL); exit 1; }
+	@chmod +x $(K0SCTL)
+	@$(K0SCTL) version >/dev/null || { echo "скачанный k0sctl не запускается"; rm -f $(K0SCTL); exit 1; }
+
+# pip запускается всегда, а не по file-таргету: venv может существовать, а
+# пакета в нём не быть (удалили, оборвалась установка) — тогда таргет по файлу
+# счёл бы всё готовым. Повторный install при удовлетворённом требовании — no-op.
 .PHONY: deps
-deps: ## установить ansible-коллекции (requirements.yml)
+deps: $(K0SCTL) ## доставить всё нужное: коллекции, python-kubernetes (.venv), k0sctl
 	ansible-galaxy collection install -r requirements.yml
+	@test -d $(VENV) || $(PYTHON) -m venv $(VENV)
+	@$(VENV)/bin/pip install --quiet --upgrade pip
+	$(VENV)/bin/pip install --quiet kubernetes
+
+.PHONY: deps-clean
+deps-clean: ## удалить локально поставленный инструментарий (.venv, bin)
+	rm -rf $(VENV) $(BIN)
 
 # Провижининг падает дорого: нехватка k0sctl или python-kubernetes всплывает
 # на шагах cluster/storage, то есть уже ПОСЛЕ prep — когда 7 узлов
 # перенастроены, а то и кластер поднят. Здесь весь инструментарий проверяется
 # до первого изменения на узлах, и перечисляются сразу все пробелы, а не по
 # одному за прогон.
+# Делится на две части: что можно доставить самим (коллекции, python-пакет,
+# k0sctl) и что доставить нельзя — сам ansible (им же и ставим остальное),
+# инвентарь (данные оператора) и bench-репа (не пакет, и путь настраиваемый).
+# Первое ставится, второе печатается с готовой командой.
 .PHONY: preflight
-preflight: ## проверить окружение оператора (бинарники, коллекции, python-kubernetes, bench-репа)
-	@fail=0; \
-	command -v $(ANSIBLE) >/dev/null 2>&1 || { echo "  нет $(ANSIBLE) — pip install ansible"; fail=1; }; \
-	command -v k0sctl   >/dev/null 2>&1 || { echo "  нет k0sctl (нужен make cluster) — github.com/k0sproject/k0sctl/releases"; fail=1; }; \
-	test -f $(INVENTORY) || { echo "  нет инвентаря $(INVENTORY)"; fail=1; }; \
-	test -f $(BENCH_REPO)/Makefile || { echo "  нет bench-репы в $(BENCH_REPO) (нужна make testbed) — склонировать рядом или задать BENCH_REPO="; fail=1; }; \
-	missing=""; \
-	have="$$(ansible-galaxy collection list 2>/dev/null)"; \
-	for c in $(COLLECTIONS); do \
-		echo "$$have" | grep -q "^$$c " || missing="$$missing $$c"; \
-	done; \
-	if [ -n "$$missing" ]; then echo "  нет коллекций:$$missing — make deps"; fail=1; \
-	else \
-		: "python-kubernetes проверяем модулем: важен интерпретатор, которым" ; \
-		: "ansible запускает модули, а не python3 из PATH — в venv/pyenv они разные" ; \
+preflight: ## проверить окружение и доставить недостающее (PREFLIGHT_INSTALL=0 — только проверка)
+	@blocked=0; auto=0; \
+	command -v $(ANSIBLE) >/dev/null 2>&1 || { echo "  нет $(ANSIBLE) — pip install ansible"; blocked=1; }; \
+	test -f $(INVENTORY) || { echo "  нет инвентаря $(INVENTORY)"; blocked=1; }; \
+	test -f $(BENCH_REPO)/Makefile || { echo "  нет bench-репы в $(BENCH_REPO) (нужна make testbed):"; \
+		echo "      git clone git@github.com:AndreyZa/sensitivityscore-hpc-bench.git $(BENCH_REPO)"; blocked=1; }; \
+	command -v k0sctl >/dev/null 2>&1 || { echo "  нет k0sctl (нужен make cluster)"; auto=1; }; \
+	miss=""; have="$$(ansible-galaxy collection list 2>/dev/null)"; \
+	for c in $(COLLECTIONS); do echo "$$have" | grep -q "^$$c " || miss="$$miss $$c"; done; \
+	[ -z "$$miss" ] || { echo "  нет коллекций:$$miss"; auto=1; }; \
+	: "Проверяем ровно тот интерпретатор, которым пойдут модули (см." ; \
+	: "inventory/host_vars/localhost.yml): сначала .venv, иначе — модулем," ; \
+	: "потому что python3 из PATH может быть не тем, что берёт ansible." ; \
+	if [ -x $(VENV)/bin/python ]; then \
+		$(VENV)/bin/python -c 'import kubernetes' 2>/dev/null \
+			|| { echo "  в .venv нет python-пакета kubernetes"; auto=1; }; \
+	elif [ -z "$$miss" ]; then \
 		ansible localhost -m community.general.python_requirements_info \
 			-a dependencies=kubernetes 2>/dev/null | grep -q 'not_found: \[\]' \
-			|| { echo "  нет python-пакета kubernetes (нужен kubernetes.core: make storage, make check) — pip install kubernetes"; fail=1; }; \
+			|| { echo "  нет python-пакета kubernetes (нужен kubernetes.core)"; auto=1; }; \
+	else auto=1; fi; \
+	if [ $$auto -eq 1 ] && [ $$blocked -eq 0 ] && [ "$(PREFLIGHT_INSTALL)" = "1" ]; then \
+		echo "-> доставляю недостающее"; \
+		$(MAKE) --no-print-directory deps || { echo "preflight: доставить не удалось"; exit 1; }; \
+		echo "-> перепроверяю"; \
+		$(MAKE) --no-print-directory preflight PREFLIGHT_INSTALL=0; exit $$?; \
 	fi; \
-	[ $$fail -eq 0 ] && echo "preflight OK" || { echo "preflight: окружение не готово (см. выше)"; exit 1; }
+	if [ $$auto -eq 1 ]; then \
+		blocked=1; \
+		[ "$(PREFLIGHT_INSTALL)" = "1" ] || echo "  (доставляется: make deps)"; \
+	fi; \
+	[ $$blocked -eq 0 ] && echo "preflight OK" || { echo "preflight: окружение не готово (см. выше)"; exit 1; }
 
 .PHONY: ping
 ping: ## проверить SSH-доступность всех узлов

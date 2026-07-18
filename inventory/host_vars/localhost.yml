@@ -1,0 +1,11 @@
+---
+# Модули kubernetes.core (storage.yml, кластерная часть check.yml) исполняются
+# интерпретатором ansible, а им нужен python-пакет kubernetes. Ставим его в
+# локальную .venv репозитория (make deps): системный python на macOS и свежих
+# Debian/Ubuntu помечен externally-managed (PEP 668), pip туда откажет, а
+# ломать системный python ради одной зависимости — плохой обмен.
+# Если .venv нет — работаем прежним интерпретатором: значит пакет поставлен
+# глобально, и это тоже рабочий вариант.
+provision_venv_python: "{{ playbook_dir }}/../.venv/bin/python"
+ansible_python_interpreter: >-
+  {{ provision_venv_python if provision_venv_python is exists else ansible_playbook_python }}

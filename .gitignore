@@ -2,6 +2,10 @@
 kubeconfig
 k0sctl.yaml
 
+# инструментарий оператора, ставится make deps
+.venv/
+bin/
+
 # ansible / secrets
 *.retry
 *.log
