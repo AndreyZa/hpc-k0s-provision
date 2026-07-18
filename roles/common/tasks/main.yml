@@ -53,9 +53,18 @@
     state: started
     enabled: true
 
+# Модуля «выключить swap» нет, но команду можно сделать честной по changed:
+# сначала смотрим /proc/swaps, и swapoff запускаем только когда есть что
+# выключать. Иначе задача всегда «ok» и не видно, был ли swap вообще.
+- name: Прочитать активные swap-разделы
+  ansible.builtin.slurp:
+    src: /proc/swaps
+  register: common_swaps
+
 - name: Выключить swap сейчас (требование kubelet)
   ansible.builtin.command: swapoff -a
-  changed_when: false
+  when: (common_swaps.content | b64decode).splitlines() | select('truthy') | list | length > 1
+  changed_when: true
 
 - name: Убрать swap из /etc/fstab (не возвращать после ребута)
   ansible.builtin.replace:

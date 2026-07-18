@@ -4,11 +4,12 @@
   become: true
   gather_facts: false
   tasks:
+    # Чтение procfs/sysfs — через slurp, а не `cat`: модуль и так read-only,
+    # поэтому не нужны changed_when/check_mode-обвязки вокруг команды.
     - name: Прочитать perf_event_paranoid
-      ansible.builtin.command: cat /proc/sys/kernel/perf_event_paranoid
+      ansible.builtin.slurp:
+        src: /proc/sys/kernel/perf_event_paranoid
       register: paranoid
-      changed_when: false
-      check_mode: false   # read-only: выполнять и в --check
 
     - name: Проверить PSI io.pressure
       ansible.builtin.stat:
@@ -16,11 +17,11 @@
       register: psi
 
     - name: Прочитать активные swap-разделы
-      ansible.builtin.command: cat /proc/swaps
+      ansible.builtin.slurp:
+        src: /proc/swaps
       register: swaps
-      changed_when: false
-      check_mode: false
 
+    # chrony модулем не читается — оставляем команду (она read-only).
     - name: Прочитать смещение времени (chrony)
       ansible.builtin.command: chronyc -n tracking
       register: chrony
@@ -29,21 +30,22 @@
       check_mode: false
 
     - name: Прочитать текущий CPU governor (bench)
-      ansible.builtin.command: cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor
+      ansible.builtin.slurp:
+        src: /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor
       register: governor
-      changed_when: false
-      failed_when: false
-      check_mode: false
+      failed_when: false   # где cpufreq недоступен — не прерывать проверку
       when: inventory_hostname in groups['bench'] | default([])
 
     - name: Сводка по узлу
       ansible.builtin.debug:
         msg:
-          - "paranoid = {{ paranoid.stdout }}"
+          - "paranoid = {{ paranoid.content | b64decode | trim }}"
           - "PSI = {{ psi.stat.exists }}"
-          - "swap активен = {{ swaps.stdout_lines | length > 1 }}"
+          # В /proc/swaps первая строка — заголовок, поэтому активный swap
+          # это >1 непустой строки.
+          - "swap активен = {{ (swaps.content | b64decode).splitlines() | select('truthy') | list | length > 1 }}"
           - "chrony: {{ chrony.stdout_lines | select('search', 'System time') | first | default('нет chrony (?)') }}"
-          - "governor: {{ governor.stdout | default('n/a (не bench)') }}"
+          - "governor: {{ (governor.content | b64decode | trim) if governor.content is defined else 'n/a (не bench)' }}"
 
 # Латентность fsync диска — узкое место etcd (нужен SSD, p99 < 10 мс).
 # Проба пишет и удаляет временный файл, в --check пропускается.
@@ -71,51 +73,67 @@
   hosts: localhost
   connection: local
   gather_facts: false
+  module_defaults:
+    group/kubernetes.core.k8s:
+      kubeconfig: "{{ playbook_dir }}/../kubeconfig"
   tasks:
     - name: Проверить наличие kubeconfig
       ansible.builtin.stat:
         path: "{{ playbook_dir }}/../kubeconfig"
       register: kc
 
-    - name: Список узлов кластера
-      ansible.builtin.command: kubectl --kubeconfig {{ playbook_dir }}/../kubeconfig get nodes -o wide
+    - name: Прочитать узлы кластера
+      kubernetes.core.k8s_info:
+        kind: Node
       register: nodes
-      changed_when: false
-      check_mode: false
       when: kc.stat.exists
 
     - name: Узлы
       ansible.builtin.debug:
-        var: nodes.stdout_lines
+        msg: >-
+          {{ item.metadata.name }}
+          roles={{ node_roles | join(',') | default('-', true) }}
+          ready={{ (item.status.conditions | selectattr('type', 'equalto', 'Ready') | first).status }}
+          {{ item.status.nodeInfo.kubeletVersion }}
+      vars:
+        node_role_prefix: '^node-role\.kubernetes\.io/'
+        node_roles: >-
+          {{ item.metadata.labels
+             | select('match', node_role_prefix)
+             | map('regex_replace', node_role_prefix, '')
+             | list }}
+      loop: "{{ nodes.resources | default([]) }}"
+      loop_control:
+        label: "{{ item.metadata.name }}"
       when: kc.stat.exists
 
     # Без StorageClass ПО УМОЛЧАНИЮ манифесты, просящие том без
     # storageClassName (ClickHouse), молча висят в Pending — отказ выглядит
     # как «под не стартует», а не как «нет хранилища». Проверяем явно.
-    - name: Найти StorageClass по умолчанию
-      ansible.builtin.shell:
-        cmd: >-
-          set -o pipefail;
-          kubectl --kubeconfig {{ playbook_dir }}/../kubeconfig get storageclass -o json
-          | python3 -c 'import json,sys;
-          items=json.load(sys.stdin)["items"];
-          d=[i["metadata"]["name"] for i in items
-          if i["metadata"].get("annotations",{}).get("storageclass.kubernetes.io/is-default-class")=="true"];
-          print(",".join(d))'
-        executable: /bin/bash
-      register: default_sc
-      changed_when: false
-      failed_when: false
-      check_mode: false
+    - name: Прочитать StorageClass'ы
+      kubernetes.core.k8s_info:
+        api_version: storage.k8s.io/v1
+        kind: StorageClass
+      register: storage_classes
       when: kc.stat.exists
 
     - name: StorageClass по умолчанию
       ansible.builtin.debug:
         msg: >-
-          {{ 'default StorageClass = ' + default_sc.stdout
-             if default_sc.stdout | default('') | length > 0
+          {{ 'default StorageClass = ' + (defaults | join(', '))
+             if defaults | length > 0
              else 'НЕТ StorageClass по умолчанию — PVC без storageClassName (ClickHouse)
                    зависнут в Pending; выполнить make storage' }}
+      vars:
+        # Ключ аннотации содержит точки, поэтому путь
+        # metadata.annotations.<key> Jinja разобрала бы как вложенность —
+        # проверяем наличие ключа тестом contains по словарю annotations.
+        defaults: >-
+          {{ storage_classes.resources | default([])
+             | map(attribute='metadata')
+             | selectattr('annotations', 'defined')
+             | selectattr('annotations', 'contains', 'storageclass.kubernetes.io/is-default-class')
+             | map(attribute='name') | list }}
       when: kc.stat.exists
 
     - name: Кластер ещё не поднят

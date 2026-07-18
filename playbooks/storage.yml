@@ -28,47 +28,86 @@
   gather_facts: false
   vars_files:
     - ../inventory/group_vars/all.yml
-  environment:
-    KUBECONFIG: "{{ playbook_dir }}/../kubeconfig"
+  vars:
+    local_path_url: >-
+      https://raw.githubusercontent.com/rancher/local-path-provisioner/{{ local_path_version }}/deploy/local-path-storage.yaml
+    # Каталог томов на узле — рядом с данными мониторинга, чтобы всё
+    # состояние стенда лежало под одним путём.
+    local_path_config_json: >-
+      {{ {'nodePathMap': [{'node': 'DEFAULT_PATH_FOR_NON_LISTED_NODES', 'paths': [local_path_dir]}]} | to_json }}
+    ss_system_placement:
+      nodeSelector:
+        node-role.kubernetes.io/ss-system: ""
+      tolerations:
+        - key: node-role.kubernetes.io/ss-system
+          operator: Exists
+          effect: NoSchedule
+  module_defaults:
+    group/kubernetes.core.k8s:
+      kubeconfig: "{{ playbook_dir }}/../kubeconfig"
   tasks:
-    - name: Проверить наличие kubectl
-      ansible.builtin.command: kubectl version --client
-      changed_when: false
+    - name: Забрать апстримный манифест
+      ansible.builtin.uri:
+        url: "{{ local_path_url }}"
+        return_content: true
+      register: local_path_manifest
 
-    - name: Развернуть local-path-provisioner (закреплённая версия)
-      ansible.builtin.command: >-
-        kubectl apply -f
-        https://raw.githubusercontent.com/rancher/local-path-provisioner/{{ local_path_version }}/deploy/local-path-storage.yaml
-      changed_when: true
+    - name: Разобрать манифест на объекты
+      ansible.builtin.set_fact:
+        local_path_docs: "{{ local_path_manifest.content | from_yaml_all | select('truthy') | list }}"
 
-    - name: Прибить провижинер к ss-system (на bench он не нужен)
-      ansible.builtin.command: >-
-        kubectl -n local-path-storage patch deployment local-path-provisioner -p
-        '{"spec":{"template":{"spec":{
-        "nodeSelector":{"node-role.kubernetes.io/ss-system":""},
-        "tolerations":[{"key":"node-role.kubernetes.io/ss-system","operator":"Exists","effect":"NoSchedule"}]}}}}'
-      changed_when: true
+    # Объекты применяются УЖЕ ИЗМЕНЁННЫМИ, а не «применить апстрим, потом
+    # пропатчить»: патч поверх апстрима на каждом прогоне возвращал бы
+    # дефолты и тут же перезаписывал их — вечный changed. Здесь прогон
+    # идемпотентен.
+    - name: Применить базовые объекты (namespace, RBAC) — без ConfigMap/Deployment/StorageClass
+      kubernetes.core.k8s:
+        state: present
+        definition: >-
+          {{ local_path_docs
+             | rejectattr('kind', 'in', ['ConfigMap', 'Deployment', 'StorageClass'])
+             | list }}
 
-    - name: Каталог томов — рядом с остальными данными стенда
-      ansible.builtin.command: >-
-        kubectl -n local-path-storage patch configmap local-path-config --type merge -p
-        '{"data":{"config.json":"{\"nodePathMap\":[{\"node\":\"DEFAULT_PATH_FOR_NON_LISTED_NODES\",\"paths\":[\"{{ local_path_dir }}\"]}]}"}}'
-      changed_when: true
+    - name: Применить ConfigMap с нашим каталогом томов
+      kubernetes.core.k8s:
+        state: present
+        definition: >-
+          {{ (local_path_docs | selectattr('kind', 'equalto', 'ConfigMap') | first)
+             | combine({'data': {'config.json': local_path_config_json}}, recursive=True) }}
 
-    # StorageClass пересоздаётся, а не патчится: reclaimPolicy — неизменяемое
-    # поле. Апстрим ставит Delete, и тогда удаление PVC (или неймспейса)
-    # уносит результаты серий вместе с томом. Для диссертационных данных
-    # нужен Retain: том переживает удаление PVC, чистить вручную.
-    - name: Убрать апстримный StorageClass
-      ansible.builtin.command: kubectl delete storageclass local-path --ignore-not-found
-      changed_when: true
+    - name: Применить Deployment, прибитый к ss-system (на bench провижинер не нужен)
+      kubernetes.core.k8s:
+        state: present
+        definition: >-
+          {{ (local_path_docs | selectattr('kind', 'equalto', 'Deployment') | first)
+             | combine({'spec': {'template': {'spec': ss_system_placement}}}, recursive=True) }}
 
-    - name: Создать StorageClass по умолчанию (Retain)
-      ansible.builtin.copy:
-        dest: "{{ playbook_dir }}/../.storageclass.yaml"
-        mode: "0644"
-        content: |
-          ---
+    # Апстримный StorageClass намеренно НЕ применяется (отфильтрован выше):
+    # у него reclaimPolicy Delete, то есть удаление PVC или неймспейса унесло
+    # бы результаты серий. Нужен Retain — но это поле НЕИЗМЕНЯЕМОЕ, поэтому
+    # класс с чужой политикой (остался от прежней установки апстрима) нельзя
+    # пропатчить, только пересоздать.
+    - name: Прочитать текущий StorageClass local-path
+      kubernetes.core.k8s_info:
+        api_version: storage.k8s.io/v1
+        kind: StorageClass
+        name: local-path
+      register: existing_sc
+
+    - name: Убрать StorageClass с чужой reclaimPolicy (поле неизменяемо)
+      kubernetes.core.k8s:
+        state: absent
+        api_version: storage.k8s.io/v1
+        kind: StorageClass
+        name: local-path
+      when:
+        - existing_sc.resources | length > 0
+        - existing_sc.resources[0].reclaimPolicy | default('') != 'Retain'
+
+    - name: StorageClass по умолчанию (Retain)
+      kubernetes.core.k8s:
+        state: present
+        definition:
           apiVersion: storage.k8s.io/v1
           kind: StorageClass
           metadata:
@@ -79,20 +118,36 @@
           reclaimPolicy: Retain
           volumeBindingMode: WaitForFirstConsumer
 
-    - name: Применить StorageClass
-      ansible.builtin.command: kubectl apply -f {{ playbook_dir }}/../.storageclass.yaml
-      changed_when: true
-
     - name: Дождаться готовности провижинера
-      ansible.builtin.command: >-
-        kubectl -n local-path-storage rollout status deployment/local-path-provisioner --timeout=180s
-      changed_when: false
+      kubernetes.core.k8s_info:
+        api_version: apps/v1
+        kind: Deployment
+        namespace: local-path-storage
+        name: local-path-provisioner
+        wait: true
+        wait_condition:
+          type: Available
+          status: "True"
+        wait_timeout: 180
 
-    - name: Показать StorageClass
-      ansible.builtin.command: kubectl get storageclass
-      register: sc_out
-      changed_when: false
+    - name: Перечитать StorageClass'ы
+      kubernetes.core.k8s_info:
+        api_version: storage.k8s.io/v1
+        kind: StorageClass
+      register: storage_classes
 
     - name: Итог
       ansible.builtin.debug:
-        msg: "{{ sc_out.stdout_lines }}"
+        msg: >-
+          StorageClass: {{ storage_classes.resources | map(attribute='metadata.name') | list | join(', ') }};
+          по умолчанию: {{ defaults | join(', ') if defaults | length > 0 else 'НЕТ (PVC без storageClassName зависнут)' }}
+      vars:
+        # Ключ аннотации содержит точки — путь вида metadata.annotations.<key>
+        # Jinja разберёт как вложенность, поэтому проверяем наличие ключа
+        # тестом contains по самому словарю annotations.
+        defaults: >-
+          {{ storage_classes.resources
+             | map(attribute='metadata')
+             | selectattr('annotations', 'defined')
+             | selectattr('annotations', 'contains', 'storageclass.kubernetes.io/is-default-class')
+             | map(attribute='name') | list }}

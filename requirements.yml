@@ -2,3 +2,7 @@
 collections:
   - name: ansible.posix       # sysctl, replace-in-fstab helpers
   - name: community.general
+  # k8s/k8s_info вместо kubectl-команд (playbooks/storage.yml, check.yml).
+  # Требует python-пакет kubernetes на управляющем хосте:
+  #   pip install kubernetes
+  - name: kubernetes.core
