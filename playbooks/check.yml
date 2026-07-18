@@ -136,6 +136,56 @@
              | map(attribute='name') | list }}
       when: kc.stat.exists
 
+    # Проверка «есть класс по умолчанию» — косвенная: она не поймает том,
+    # который не смог создаться. ClickHouse — единственный потребитель PVC на
+    # стенде, поэтому его готовность и есть прямое доказательство, что
+    # хранилище работает, а не только объявлено.
+    - name: Прочитать StatefulSet ClickHouse
+      kubernetes.core.k8s_info:
+        api_version: apps/v1
+        kind: StatefulSet
+        namespace: sensitivityscore-system
+        name: clickhouse
+      register: ch_sts
+      when: kc.stat.exists
+
+    - name: ClickHouse (приёмник результатов прода)
+      ansible.builtin.debug:
+        msg: >-
+          {{ 'ClickHouse готов: ' + (ready | string) + '/' + (desired | string) + ' реплик'
+             if ready | int > 0
+             else ('ClickHouse НЕ готов (' + (ready | string) + '/' + (desired | string) + ') —
+                    типичная причина: PVC в Pending, проверить StorageClass по умолчанию'
+                   if ch_sts.resources | length > 0
+                   else 'ClickHouse не развёрнут — make clickhouse') }}
+      vars:
+        ready: "{{ (ch_sts.resources[0].status.readyReplicas | default(0)) if ch_sts.resources | length > 0 else 0 }}"
+        desired: "{{ (ch_sts.resources[0].spec.replicas | default(0)) if ch_sts.resources | length > 0 else 0 }}"
+      when: kc.stat.exists
+
+    - name: Прочитать Deployment'ы мониторинга
+      kubernetes.core.k8s_info:
+        api_version: apps/v1
+        kind: Deployment
+        namespace: sensitivityscore-monitoring
+      register: mon_deploys
+      when: kc.stat.exists
+
+    - name: Мониторинг
+      ansible.builtin.debug:
+        msg: >-
+          {{ ('мониторинг: ' + (states | join(', ')))
+             if mon_deploys.resources | default([]) | length > 0
+             else 'мониторинг не развёрнут — make monitoring' }}
+      vars:
+        states: >-
+          {{ mon_deploys.resources | default([])
+             | map(attribute='metadata.name') | zip(
+                 mon_deploys.resources | default([])
+                 | map(attribute='status.readyReplicas') | map('default', 0))
+             | map('join', '=') | list }}
+      when: kc.stat.exists
+
     - name: Кластер ещё не поднят
       ansible.builtin.debug:
         msg: "kubeconfig не найден — сначала make cluster"

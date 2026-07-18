@@ -81,10 +81,26 @@ testbed: ## роли узлов + Redis/scheduler/agent (через bench-реп
 storage: ## динамическое хранилище (local-path StorageClass по умолчанию)
 	$(ANSIBLE) -i $(INVENTORY) playbooks/storage.yml
 
+# Оба стека прибиты к ss-system и потому идут ПОСЛЕ testbed (он вешает метку
+# роли) и ПОСЛЕ storage: PVC ClickHouse просит том без storageClassName и без
+# класса по умолчанию молча повиснет в Pending.
+MONITORING_OVERLAY_PROD ?= k8s/monitoring/overlays/prod
+CH_KUSTOMIZE_PROD       ?= k8s/clickhouse/overlays/prod
+
+.PHONY: monitoring
+monitoring: ## Prometheus + Grafana на ss-system (prod-overlay bench-репы)
+	KUBECONFIG=$(KUBECONFIG_OUT) $(MAKE) -C $(BENCH_REPO) monitoring-deploy \
+		MONITORING_OVERLAY=$(MONITORING_OVERLAY_PROD)
+
+.PHONY: clickhouse
+clickhouse: ## in-cluster ClickHouse на ss-system (приёмник результатов прода)
+	KUBECONFIG=$(KUBECONFIG_OUT) $(MAKE) -C $(BENCH_REPO) ch-incluster-deploy \
+		CH_KUSTOMIZE=$(CH_KUSTOMIZE_PROD)
+
 .PHONY: check
 check: ## пост-проверки (paranoid, PSI, ноды Ready)
 	$(ANSIBLE) -i $(INVENTORY) playbooks/check.yml
 
 .PHONY: provision
-provision: preflight prep cluster testbed storage check ## полный цикл: ОС -> кластер -> тестбед -> хранилище -> проверки
+provision: preflight prep cluster testbed storage clickhouse monitoring check ## полный цикл: ОС -> кластер -> тестбед -> хранилище -> ClickHouse+мониторинг -> проверки
 	@echo "OK — стенд поднят. kubeconfig: $(KUBECONFIG_OUT)"
