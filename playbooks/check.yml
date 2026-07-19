@@ -39,13 +39,61 @@
     - name: Сводка по узлу
       ansible.builtin.debug:
         msg:
-          - "paranoid = {{ paranoid.content | b64decode | trim }}"
+          - "paranoid = {{ node_paranoid }}"
           - "PSI = {{ psi.stat.exists }}"
-          # В /proc/swaps первая строка — заголовок, поэтому активный swap
-          # это >1 непустой строки.
-          - "swap активен = {{ (swaps.content | b64decode).splitlines() | select('truthy') | list | length > 1 }}"
+          - "swap активен = {{ node_swap_on }}"
           - "chrony: {{ chrony.stdout_lines | select('search', 'System time') | first | default('нет chrony (?)') }}"
-          - "governor: {{ (governor.content | b64decode | trim) if governor.content is defined else 'n/a (не bench)' }}"
+          - "governor: {{ node_governor }}"
+      vars: &node_state
+        node_paranoid: "{{ paranoid.content | b64decode | trim }}"
+        # В /proc/swaps первая строка — заголовок, поэтому активный swap
+        # это >1 непустой строки.
+        node_swap_on: "{{ (swaps.content | b64decode).splitlines() | select('truthy') | list | length > 1 }}"
+        node_governor: >-
+          {{ (governor.content | b64decode | trim) if governor.content is defined else 'n/a (не bench)' }}
+        node_is_bench: "{{ inventory_hostname in groups['bench'] | default([]) }}"
+
+    # Раньше здесь заканчивалось: семь debug-блоков и «OK — стенд поднят».
+    # Провалиться check не мог в принципе, хотя стенд с paranoid=3 (PMU
+    # закрыт), governor=powersave на одном узле из трёх или мёртвым PSI даёт
+    # не отказ, а ПРАВДОПОДОБНЫЕ данные — серия отработает часы и запишет
+    # числа, по которым потом не понять, что мерили.
+    #
+    # Проблемы копятся в список и проверяются одним assert, а не набором
+    # отдельных: assert падает на первом, и оператор чинил бы стенд по одной
+    # находке за прогон, каждый раз заново обходя семь узлов.
+    - name: Собрать нарушения по узлу
+      ansible.builtin.set_fact:
+        node_problems: >-
+          {{
+            ([] if node_paranoid | int <= perf_event_paranoid | int
+             else ['perf_event_paranoid=' ~ node_paranoid ~ ' (нужно <= ' ~ perf_event_paranoid ~ ') — ' ~ pmu_msg])
+            + ([] if psi.stat.exists else [psi_msg])
+            + ([] if not (node_swap_on | bool) else [swap_msg])
+            + ([] if chrony.rc == 0 else [chrony_msg])
+            + ([] if not (node_is_bench | bool) or node_governor in ['performance', 'n/a (не bench)']
+               else ['governor=' ~ node_governor ~ ' на измерительном узле — ' ~ gov_msg])
+          }}
+      vars:
+        # Тексты отдельными переменными: в свёрнутом блоке YAML строка,
+        # разбитая с отступом, сохраняет перенос — сообщения печатались рваными.
+        pmu_msg: "агент не сможет читать PMU, оси LLC и NUMA останутся пустыми"
+        psi_msg: "нет /sys/fs/cgroup/io.pressure: ось IO не измеряется (нужен cgroup v2 с PSI)"
+        swap_msg: "активен swap: kubelet его не допускает, а подкачка посреди замера портит makespan"
+        chrony_msg: "chronyc не отвечает: время узла не синхронизировано, makespan-таймстемпы несравнимы"
+        gov_msg: "нужен performance, иначе частота плавает и makespan шумит"
+        <<: *node_state
+
+    - name: Узел пригоден для измерений
+      ansible.builtin.assert:
+        that: node_problems | length == 0
+        fail_msg: |-
+          {{ inventory_hostname }} к измерениям НЕ готов:
+          {% for p in node_problems %}
+            - {{ p }}
+          {% endfor %}
+        success_msg: "{{ inventory_hostname }}: пригоден для измерений"
+        quiet: true
 
 # Латентность fsync диска — узкое место etcd (нужен SSD, p99 < 10 мс).
 # Проба пишет и удаляет временный файл, в --check пропускается.
@@ -186,7 +234,78 @@
              | map('join', '=') | list }}
       when: kc.stat.exists
 
+    # Компоненты тестбеда: без них стенд выглядит поднятым, но серия либо не
+    # пойдёт, либо пойдёт вхолостую. Мёртвый агент на одном узле из трёх —
+    # самый скверный случай: планировщик считает узел «без метрик», ставит ему
+    # нейтральный скор и продолжает работать, а серия молча меряет не то.
+    - name: Прочитать DaemonSet агента метрик
+      kubernetes.core.k8s_info:
+        api_version: apps/v1
+        kind: DaemonSet
+        namespace: sensitivityscore-system
+        name: sensitivityscore-metrics-agent
+      register: agent_ds
+      when: kc.stat.exists
+
+    - name: Прочитать Deployment планировщика
+      kubernetes.core.k8s_info:
+        api_version: apps/v1
+        kind: Deployment
+        namespace: sensitivityscore-system
+        name: sensitivityscore-scheduler
+      register: sched_deploy
+      when: kc.stat.exists
+
+    - name: Собрать нарушения по кластеру
+      ansible.builtin.set_fact:
+        cluster_problems: >-
+          {{
+            ([] if not_ready | trim | length == 0 else ['узлы не Ready: ' ~ (not_ready | trim)])
+            + ([] if default_sc | length > 0 else [sc_msg])
+            + ([] if agent_ready | int > 0 and agent_ready | int == agent_desired | int
+               else ['metrics-agent Ready ' ~ agent_ready ~ '/' ~ agent_desired ~ ' — ' ~ agent_msg])
+            + ([] if sched_ready | int > 0 else [sched_msg])
+          }}
+      vars:
+        # Тексты вынесены в переменные: внутри свёрнутого блока YAML строка,
+        # разбитая на несколько строк с отступом, СОХРАНЯЕТ переносы — из-за
+        # этого сообщения печатались рваными.
+        sc_msg: "нет StorageClass по умолчанию: PVC ClickHouse зависнет в Pending — make storage"
+        agent_msg: "узлы без агента планировщик сочтёт «без метрик» и даст нейтральный скор, серия померяет не то"
+        sched_msg: "планировщик не Ready: плечо A-sensitivityscore выродится в default"
+        # Готовность узла лежит внутри списка conditions, а selectattr по
+        # вложенному условию Jinja не выражает — поэтому явный цикл.
+        not_ready: >-
+          {% set bad = [] %}
+          {% for n in nodes.resources | default([]) %}
+          {%   set ready = n.status.conditions | selectattr('type', 'equalto', 'Ready')
+                           | map(attribute='status') | first | default('Unknown') %}
+          {%   if ready != 'True' %}{{ bad.append(n.metadata.name) or '' }}{% endif %}
+          {% endfor %}
+          {{ bad | join(', ') }}
+        default_sc: >-
+          {{ storage_classes.resources | default([]) | map(attribute='metadata')
+             | selectattr('annotations', 'defined')
+             | selectattr('annotations', 'contains', 'storageclass.kubernetes.io/is-default-class')
+             | list }}
+        agent_ready: "{{ (agent_ds.resources[0].status.numberReady | default(0)) if agent_ds.resources | default([]) | length > 0 else 0 }}"
+        agent_desired: "{{ (agent_ds.resources[0].status.desiredNumberScheduled | default(0)) if agent_ds.resources | default([]) | length > 0 else 0 }}"
+        sched_ready: "{{ (sched_deploy.resources[0].status.readyReplicas | default(0)) if sched_deploy.resources | default([]) | length > 0 else 0 }}"
+      when: kc.stat.exists
+
+    - name: Кластер пригоден для серии
+      ansible.builtin.assert:
+        that: cluster_problems | length == 0
+        fail_msg: |-
+          Кластер к серии НЕ готов:
+          {% for p in cluster_problems %}
+            - {{ p }}
+          {% endfor %}
+        success_msg: "кластер пригоден для серии"
+        quiet: true
+      when: kc.stat.exists
+
     - name: Кластер ещё не поднят
-      ansible.builtin.debug:
+      ansible.builtin.fail:
         msg: "kubeconfig не найден — сначала make cluster"
       when: not kc.stat.exists
