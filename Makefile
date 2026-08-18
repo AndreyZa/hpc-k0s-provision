@@ -133,6 +133,16 @@ prep: ## OS-подготовка всех узлов (Ubuntu/perf/PSI/swap/вр�
 cluster: ## поднять k0s HA-кластер и записать ./kubeconfig
 	$(ANSIBLE) -i $(INVENTORY) playbooks/cluster.yml
 
+# Свой CoreDNS — СРАЗУ после cluster: встроенный отключён installFlags, и до
+# этого шага DNS в свежем кластере нет вовсе (metrics-agent без него не найдёт
+# Redis). Метку роли вешаем здесь же: на свежем кластере её ещё некому было
+# повесить (bootstrap идёт позже, в testbed, и повторит её идемпотентно).
+.PHONY: coredns
+coredns: ## CoreDNS стенда на ss-system (встроенный k0s-coredns отключён)
+	KUBECONFIG=$(KUBECONFIG_OUT) kubectl label node $(SS_SYSTEM_NODE) \
+		node-role.kubernetes.io/ss-system= --overwrite
+	KUBECONFIG=$(KUBECONFIG_OUT) $(MAKE) -C $(BENCH_REPO) coredns-deploy
+
 .PHONY: testbed
 testbed: ## роли узлов + Redis/scheduler/agent (через bench-репу)
 	KUBECONFIG=$(KUBECONFIG_OUT) $(MAKE) -C $(BENCH_REPO) setup-cluster SS_NODES=$(SS_SYSTEM_NODE)
@@ -177,5 +187,5 @@ kubeconfig-install: ## kubeconfig -> ~/.kube/configs/prod + сделать де�
 	@echo "kubeconfig прода: ~/.kube/configs/prod (дефолт: симлинк ~/.kube/config)"
 
 .PHONY: provision
-provision: preflight prep cluster testbed storage clickhouse monitoring check kubeconfig-install ## полный цикл: ОС -> кластер -> тестбед -> хранилище -> ClickHouse+мониторинг -> проверки -> kubeconfig
+provision: preflight prep cluster coredns testbed storage clickhouse monitoring check kubeconfig-install ## полный цикл: ОС -> кластер -> CoreDNS -> тестбед -> хранилище -> ClickHouse+мониторинг -> проверки -> kubeconfig
 	@echo "OK — стенд поднят. kubeconfig: ~/.kube/configs/prod (дефолт)"

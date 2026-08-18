@@ -59,6 +59,13 @@ spec:
 {% for h in groups['controllers'] %}
     # {{ h }} — control-plane (без kubelet, etcd-кворум)
     - role: controller
+      # Встроенный CoreDNS отключён: его 2 реплики с anti-affinity вставали
+      # ТОЛЬКО на измерительные узлы (CP не узлы, ss-system под taint'ом) и
+      # шумели там DNS-нагрузкой всего кластера. Свой CoreDNS (1 реплика на
+      # ss-system) ставит bench-репа: make coredns-deploy — в цепочке
+      # provision он идёт сразу после cluster.
+      installFlags:
+        - --disable-components=coredns
       ssh:
         address: {{ hostvars[h].ansible_host }}
         user: {{ hostvars[h].ansible_user | default('ubuntu') }}
