@@ -6,9 +6,11 @@ PYTHON         ?= python3
 INVENTORY      ?= inventory/hosts.yml
 KUBECONFIG_OUT ?= $(CURDIR)/kubeconfig
 BENCH_REPO     ?= ../sensitivityscore-hpc-bench
-# Имя ss-system-узла в k8s (см. inventory). Комментарий — отдельной строкой:
-# в make всё до `#` попадает в значение вместе с пробелами перед ним.
-SS_SYSTEM_NODE ?= sssystem
+# Имя ss-system-узла в k8s. k0s берёт hostname машины, поэтому это имя ВМ у
+# партнёра (как в inventory); в день провижна сверить с `kubectl get nodes` и
+# при расхождении передать явно: make testbed SS_SYSTEM_NODE=<имя>.
+# Комментарий — отдельной строкой: в make всё до `#` попадает в значение.
+SS_SYSTEM_NODE ?= ss-system
 
 # Коллекции берём из requirements.yml, чтобы список не разъезжался с deps.
 COLLECTIONS = $(shell awk '$$1=="-" && $$2=="name:" {print $$3}' requirements.yml)
