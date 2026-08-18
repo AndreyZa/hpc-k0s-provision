@@ -183,6 +183,10 @@
       ansible.builtin.file:
         path: /var/lib/.etcd-fsync-probe
         state: absent
+      # Цикл «создать пробу — замерить — убрать» не меняет состояние хоста,
+      # но file честно рапортовал changed на каждом прогоне: read-only check
+      # выглядел неидемпотентным (changed=1 в recap на ровном месте).
+      changed_when: false
 
     - name: Результат пробы (ориентир — десятки MB/s на SSD; ~1 MB/s недостаточно для etcd)
       ansible.builtin.debug:
