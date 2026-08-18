@@ -161,6 +161,21 @@ clickhouse: ## in-cluster ClickHouse на ss-system (приёмник резул
 check: ## пост-проверки (paranoid, PSI, ноды Ready)
 	$(ANSIBLE) -i $(INVENTORY) playbooks/check.yml
 
+# Конвенцию пути (~/.kube/configs/prod) ждут run-series.sh и bench-таргеты;
+# симлинк ~/.kube/config делает прод дефолтом для голого kubectl на операторе
+# (на лабе прежний дефолт — local72 — заранее переложен в configs/local72.yaml).
+# Существующий НЕ-симлинк ~/.kube/config не затирается, а откладывается рядом.
+.PHONY: kubeconfig-install
+kubeconfig-install: ## kubeconfig -> ~/.kube/configs/prod + сделать дефолтным (симлинк ~/.kube/config)
+	@test -s $(KUBECONFIG_OUT) || { echo "нет $(KUBECONFIG_OUT) — сначала make cluster"; exit 1; }
+	install -m 600 -D $(KUBECONFIG_OUT) $(HOME)/.kube/configs/prod
+	@if [ -f $(HOME)/.kube/config ] && [ ! -L $(HOME)/.kube/config ]; then \
+		mv $(HOME)/.kube/config $(HOME)/.kube/configs/pre-prod-backup.yaml; \
+		echo "прежний ~/.kube/config сохранён: ~/.kube/configs/pre-prod-backup.yaml"; \
+	fi
+	ln -sfn $(HOME)/.kube/configs/prod $(HOME)/.kube/config
+	@echo "kubeconfig прода: ~/.kube/configs/prod (дефолт: симлинк ~/.kube/config)"
+
 .PHONY: provision
-provision: preflight prep cluster testbed storage clickhouse monitoring check ## полный цикл: ОС -> кластер -> тестбед -> хранилище -> ClickHouse+мониторинг -> проверки
-	@echo "OK — стенд поднят. kubeconfig: $(KUBECONFIG_OUT)"
+provision: preflight prep cluster testbed storage clickhouse monitoring check kubeconfig-install ## полный цикл: ОС -> кластер -> тестбед -> хранилище -> ClickHouse+мониторинг -> проверки -> kubeconfig
+	@echo "OK — стенд поднят. kubeconfig: ~/.kube/configs/prod (дефолт)"
