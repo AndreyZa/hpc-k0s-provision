@@ -14,6 +14,34 @@ spec:
       spec:
         telemetry:
           enabled: false
+        # Профиль kubelet для ИЗМЕРИТЕЛЬНЫХ узлов. Дефолт k0s — cpuManagerPolicy
+        # none, topologyManager none и нулевой system/kube-reserved: жертва с
+        # cpu=32 (Guaranteed) не получает эксклюзивных ядер, ядра ей выдаёт CFS
+        # вперемешку со служебными процессами, а страницы могут лежать в чужом
+        # NUMA-домене. На двухсокетном Xeon это прямо портит NUMA-ось: она
+        # мерила бы не размещение задачи, а случайность планировщика Linux.
+        #
+        # static ТРЕБУЕТ ненулевого reserved (иначе kubelet не стартует): из
+        # 128 потоков узла резервируем 4 под систему и kubelet, остальное — в
+        # эксклюзивный пул. single-numa-node заставляет kubelet допускать под
+        # только если CPU и память берутся из ОДНОГО домена; жертва на 32 CPU
+        # помещается в сокет (64 потока), агрессоры малы.
+        #
+        # ВАЖНО: политика применяется при ПЕРВОМ старте kubelet. Смена на живом
+        # узле требует удалить /var/lib/k0s/kubelet/cpu_manager_state и
+        # перезапустить k0sworker — на вводе стенда это бесплатно, между
+        # сериями так делать нельзя (сравнимость чисел).
+        workerProfiles:
+          - name: bench
+            values:
+              cpuManagerPolicy: static
+              topologyManagerPolicy: single-numa-node
+              systemReserved:
+                cpu: "2"
+                memory: "8Gi"
+              kubeReserved:
+                cpu: "2"
+                memory: "8Gi"
   hosts:
 {% for h in groups['controllers'] %}
     # {{ h }} — control-plane (без kubelet, etcd-кворум)
@@ -24,8 +52,15 @@ spec:
         keyPath: {{ ssh_key_path }}
 {% endfor %}
 {% for h in groups['workers'] %}
-    # {{ h }} — worker
+{% set is_bench = h in groups['bench'] | default([]) %}
+    # {{ h }} — worker{{ ' (измерительный: профиль kubelet bench)' if is_bench else '' }}
     - role: worker
+{% if is_bench %}
+      # Профиль назначается ФЛАГОМ УСТАНОВКИ: у узла нет способа подхватить его
+      # позже сам по себе — только пере-джойн или правка юнита k0sworker.
+      installFlags:
+        - --profile=bench
+{% endif %}
       ssh:
         address: {{ hostvars[h].ansible_host }}
         user: {{ hostvars[h].ansible_user | default('ubuntu') }}
