@@ -14,6 +14,19 @@ spec:
       spec:
         telemetry:
           enabled: false
+        # Внешнего LB перед API нет (см. README про честность HA), и без него
+        # konnectivity-агенты видели ТОЛЬКО первый контроллер: на вводе прода
+        # 18.08 все 4 агента сидели на cp-1, у cp-2/cp-3 — ноль туннелей.
+        # In-cluster клиенты ходят в API через ClusterIP по всем трём
+        # apiserver'ам, и 2/3 запросов к агрегированным API (metrics.k8s.io)
+        # падали «unable to handle the request»: APIService флапал, load-watcher
+        # не проходил readiness, testbed валился по rollout-таймауту. NLLB даёт
+        # каждому воркеру локальный балансер на все CP — агенты открывают
+        # туннели ко всем konnectivity-серверам, заодно kubelet переживает
+        # смерть cp-1.
+        network:
+          nodeLocalLoadBalancing:
+            enabled: true
         # Профиль kubelet для ИЗМЕРИТЕЛЬНЫХ узлов. Дефолт k0s — cpuManagerPolicy
         # none, topologyManager none и нулевой system/kube-reserved: жертва с
         # cpu=32 (Guaranteed) не получает эксклюзивных ядер, ядра ей выдаёт CFS
