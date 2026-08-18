@@ -52,6 +52,10 @@
     name: chrony
     state: started
     enabled: true
+  # В --check установка chrony шагом выше лишь имитируется, и на хосте без
+  # пакета этот таск падал «Could not find the requested service» (вся
+  # репетиция 18.08 казалась красной). В реальном прогоне строгость прежняя.
+  ignore_errors: "{{ ansible_check_mode }}"
 
 # Модуля «выключить swap» нет, но команду можно сделать честной по changed:
 # сначала смотрим /proc/swaps, и swapoff запускаем только когда есть что
