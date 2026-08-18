@@ -1,5 +1,21 @@
 ---
-- name: Записать perf_event_paranoid навсегда (sysctl.d)
+# Не все ядра несут оба ключа (nmi_watchdog отсутствует без CONFIG_HARDLOCKUP,
+# numa_balancing — без CONFIG_NUMA_BALANCING). Записать их вслепую нельзя:
+# `sysctl --system` на несуществующем ключе ругается и роняет прогон.
+- name: Проверить поддержку ядром perf-ключей
+  ansible.builtin.stat:
+    path: "/proc/sys/kernel/{{ item }}"
+  loop:
+    - nmi_watchdog
+    - numa_balancing
+  register: perf_key_stat
+
+- name: Запомнить поддержку perf-ключей
+  ansible.builtin.set_fact:
+    perf_nmi_watchdog_supported: "{{ perf_key_stat.results[0].stat.exists }}"
+    perf_numa_balancing_supported: "{{ perf_key_stat.results[1].stat.exists }}"
+
+- name: Записать perf-настройки ядра навсегда (sysctl.d)
   ansible.builtin.template:
     src: 99-perf.conf.j2
     dest: /etc/sysctl.d/99-perf.conf
@@ -14,6 +30,24 @@
     state: present
     reload: true
 
+- name: Применить nmi_watchdog сейчас (освободить PMU-счётчик)
+  ansible.posix.sysctl:
+    name: kernel.nmi_watchdog
+    value: "{{ perf_nmi_watchdog | string }}"
+    sysctl_set: true
+    state: present
+    reload: true
+  when: perf_nmi_watchdog_supported | bool
+
+- name: Применить numa_balancing сейчас (детерминизм NUMA-оси)
+  ansible.posix.sysctl:
+    name: kernel.numa_balancing
+    value: "{{ kernel_numa_balancing | string }}"
+    sysctl_set: true
+    state: present
+    reload: true
+  when: perf_numa_balancing_supported | bool
+
 - name: Проверить наличие PSI (io.pressure) — нужен для IO-оси
   ansible.builtin.stat:
     path: /sys/fs/cgroup/io.pressure
@@ -27,21 +61,24 @@
       иначе boot-параметр psi=1 (docs «Ввод §5»)
     quiet: true
 
-# --- Только bench-узлы: фиксированный CPU governor (стабильность makespan) ---
+# --- Узлы, исполняющие нагрузку: фиксированный CPU governor ---
+#
+# Критерий — node_runs_workload (group_vars/all.yml), а НЕ членство в группе
+# bench: стенд с совмещёнными ролями иначе тихо оставался на schedutil.
 
 - name: Отключить ondemand.service (перебивал бы governor при загрузке)
   ansible.builtin.systemd_service:
     name: ondemand.service
     enabled: false
   failed_when: false   # юнита может не быть на современных Ubuntu
-  when: inventory_hostname in groups['bench'] | default([])
+  when: node_runs_workload | bool
 
 - name: Установить systemd-юнит фиксации governor (переживает ребут)
   ansible.builtin.template:
     src: cpupower-governor.service.j2
     dest: /etc/systemd/system/cpupower-governor.service
     mode: "0644"
-  when: inventory_hostname in groups['bench'] | default([])
+  when: node_runs_workload | bool
 
 - name: Включить юнит cpupower-governor
   ansible.builtin.systemd_service:
@@ -49,7 +86,7 @@
     enabled: true
     daemon_reload: true
   when:
-    - inventory_hostname in groups['bench'] | default([])
+    - node_runs_workload | bool
     - not ansible_check_mode   # в --check юнит ещё не записан на диск
 
 - name: Применить governor сейчас (не ждать ребута)
@@ -57,14 +94,14 @@
   register: perf_governor
   changed_when: "perf_governor.rc == 0"
   failed_when: false   # где cpufreq недоступен — не прерывать прогон
-  when: inventory_hostname in groups['bench'] | default([])
+  when: node_runs_workload | bool
 
-- name: Показать результат governor (bench)
+- name: Показать результат governor (узел с нагрузкой)
   ansible.builtin.debug:
     msg: >-
       {{ inventory_hostname }}: cpupower rc={{ perf_governor.rc }}
       ({{ 'ok' if perf_governor.rc == 0 else 'cpufreq недоступен — пропущено' }})
   when:
-    - inventory_hostname in groups['bench'] | default([])
+    - node_runs_workload | bool
     - perf_governor.rc is defined
     - not (perf_governor.skipped | default(false))   # в --check команда пропущена, но skip-результат содержит rc=0 — сообщение было бы недостоверным

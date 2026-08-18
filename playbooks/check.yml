@@ -29,12 +29,39 @@
       failed_when: false
       check_mode: false
 
-    - name: Прочитать текущий CPU governor (bench)
+    - name: Прочитать текущий CPU governor (узел с нагрузкой)
       ansible.builtin.slurp:
         src: /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor
       register: governor
       failed_when: false   # где cpufreq недоступен — не прерывать проверку
-      when: inventory_hostname in groups['bench'] | default([])
+      when: node_runs_workload | bool
+
+    # NMI-watchdog держит аппаратный PMU-счётчик на каждом ядре: с ним узел
+    # уходит в мультиплексирование на четырёх событиях агента, и LLC/NUMA
+    # становятся экстраполяцией. Ключа может не быть — тогда и проверять нечего.
+    - name: Прочитать nmi_watchdog
+      ansible.builtin.slurp:
+        src: /proc/sys/kernel/nmi_watchdog
+      register: nmi_watchdog
+      failed_when: false
+
+    - name: Прочитать numa_balancing
+      ansible.builtin.slurp:
+        src: /proc/sys/kernel/numa_balancing
+      register: numa_balancing
+      failed_when: false
+
+    # Периодика на измерительном узле: любой таймер, стрельнувший посреди
+    # замера, попадает в makespan. apt глушит роль common, но узел может нести
+    # и свои (на лабе .72 — wifi-watchdog каждые 2 минуты).
+    # Модуля для ПЕРЕЧИСЛЕНИЯ таймеров нет (systemd_service управляет
+    # конкретным юнитом, а список не отдаёт), команда read-only — отсюда noqa.
+    - name: Прочитать активные таймеры systemd  # noqa: command-instead-of-module
+      ansible.builtin.command: systemctl list-units --type=timer --state=active --no-legend --no-pager --plain
+      register: timers
+      changed_when: false
+      failed_when: false
+      check_mode: false
 
     - name: Сводка по узлу
       ansible.builtin.debug:
@@ -44,6 +71,9 @@
           - "swap активен = {{ node_swap_on }}"
           - "chrony: {{ chrony.stdout_lines | select('search', 'System time') | first | default('нет chrony (?)') }}"
           - "governor: {{ node_governor }}"
+          - "nmi_watchdog = {{ node_nmi_watchdog }} (нужно {{ perf_nmi_watchdog }} на узлах с нагрузкой)"
+          - "numa_balancing = {{ node_numa_balancing }} (нужно {{ kernel_numa_balancing }})"
+          - "посторонние таймеры: {{ node_foreign_timers | default([]) | join(', ') | default('нет', true) }}"
       vars: &node_state
         node_paranoid: "{{ paranoid.content | b64decode | trim }}"
         # В /proc/swaps первая строка — заголовок, поэтому активный swap
@@ -51,7 +81,36 @@
         node_swap_on: "{{ (swaps.content | b64decode).splitlines() | select('truthy') | list | length > 1 }}"
         node_governor: >-
           {{ (governor.content | b64decode | trim) if governor.content is defined else 'n/a (не bench)' }}
-        node_is_bench: "{{ inventory_hostname in groups['bench'] | default([]) }}"
+        node_is_bench: "{{ node_runs_workload | bool }}"
+        node_nmi_watchdog: >-
+          {{ (nmi_watchdog.content | b64decode | trim) if nmi_watchdog.content is defined else 'n/a (ключа нет)' }}
+        node_numa_balancing: >-
+          {{ (numa_balancing.content | b64decode | trim) if numa_balancing.content is defined else 'n/a (ключа нет)' }}
+        # Белый список — то, что стенду не мешает: сама периодика systemd и
+        # логротация. Всё остальное на узле с нагрузкой требует решения.
+        # Белый список: периодика самой ОС, которая стенду не мешает.
+        # Списком, а не одной строкой: свёрнутый скаляр склеивает строки
+        # ЧЕРЕЗ ПРОБЕЛ, и пробелы внутри альтернации ломают регексп —
+        # e2scrub_all и motd-news тогда пролезали в «посторонние».
+        timers_ok:
+          - systemd-tmpfiles-clean
+          - systemd-journal
+          - logrotate
+          - man-db
+          - fstrim
+          - e2scrub_all
+          - dpkg-db-backup
+          - apt-daily
+          - motd-news
+          - update-notifier
+          - fwupd-refresh
+          - snapd
+        timers_whitelist: "^({{ timers_ok | join('|') }})"
+        node_foreign_timers: >-
+          {{ (timers.stdout_lines | default([]))
+             | map('split') | map('first')
+             | reject('match', timers_whitelist)
+             | list }}
 
     # Раньше здесь заканчивалось: семь debug-блоков и «OK — стенд поднят».
     # Провалиться check не мог в принципе, хотя стенд с paranoid=3 (PMU
@@ -73,15 +132,27 @@
             + ([] if chrony.rc == 0 else [chrony_msg])
             + ([] if not (node_is_bench | bool) or node_governor in ['performance', 'n/a (не bench)']
                else ['governor=' ~ node_governor ~ ' на измерительном узле — ' ~ gov_msg])
+            + ([] if not (node_is_bench | bool) or node_nmi_watchdog in [perf_nmi_watchdog | string, 'n/a (ключа нет)']
+               else ['nmi_watchdog=' ~ node_nmi_watchdog ~ ' — ' ~ nmi_msg])
+            + ([] if node_numa_balancing in [kernel_numa_balancing | string, 'n/a (ключа нет)']
+               else ['numa_balancing=' ~ node_numa_balancing ~ ' — ' ~ numa_msg])
           }}
       vars:
         # Тексты отдельными переменными: в свёрнутом блоке YAML строка,
         # разбитая с отступом, сохраняет перенос — сообщения печатались рваными.
-        pmu_msg: "агент не сможет читать PMU, оси LLC и NUMA останутся пустыми"
+        # Текст правился 18.08.2026: прежний утверждал, что агент «не сможет
+        # читать PMU». Это неверно — агент запускается с CAP_PERFMON и на
+        # ядре с paranoid=4 считает cgroup-scoped события штатно (проверено
+        # прямым perf stat на лабе). Настоящая цена ужесточения — ручные
+        # инструменты без capability (perf, perfcheck из runbook) и расхождение
+        # узла с эталоном стенда.
+        pmu_msg: "host-side perf и perfcheck работать не будут (агенту с CAP_PERFMON — да), и узел расходится с эталоном стенда"
         psi_msg: "нет /sys/fs/cgroup/io.pressure: ось IO не измеряется (нужен cgroup v2 с PSI)"
         swap_msg: "активен swap: kubelet его не допускает, а подкачка посреди замера портит makespan"
         chrony_msg: "chronyc не отвечает: время узла не синхронизировано, makespan-таймстемпы несравнимы"
         gov_msg: "нужен performance, иначе частота плавает и makespan шумит"
+        nmi_msg: "watchdog держит PMU-счётчик: на событиях агента узел уйдёт в мультиплексирование, LLC/NUMA станут экстраполяцией"
+        numa_msg: "значение не зафиксировано методикой: автобалансировка мигрирует страницы во время замера и искажает NUMA-ось"
         <<: *node_state
 
     - name: Узел пригоден для измерений

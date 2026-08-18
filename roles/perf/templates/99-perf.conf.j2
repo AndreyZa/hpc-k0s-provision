@@ -1,2 +1,12 @@
 # Управляется prod-provision (роль perf). См. sensitivityscore-hpc-bench/docs «Ввод прод-стенда» §5.
 kernel.perf_event_paranoid = {{ perf_event_paranoid }}
+{% if perf_nmi_watchdog_supported %}
+# Освобождает аппаратный PMU-счётчик, который иначе держит NMI-watchdog:
+# при 4 событиях агента на cgroup пода узел иначе уходит в мультиплексирование.
+kernel.nmi_watchdog = {{ perf_nmi_watchdog }}
+{% endif %}
+{% if perf_numa_balancing_supported %}
+# Явная фиксация: с автобалансировкой ядро мигрирует страницы во время замера,
+# и NUMA-ось меряет реакцию балансировщика, а не размещение задачи.
+kernel.numa_balancing = {{ kernel_numa_balancing }}
+{% endif %}
