@@ -129,6 +129,15 @@ dry-run: ## prep в режиме --check --diff — показать, что и�
 prep: ## OS-подготовка всех узлов (Ubuntu/perf/PSI/swap/время/governor)
 	$(ANSIBLE) -i $(INVENTORY) playbooks/prep.yml
 
+.PHONY: kernels
+kernels: ## выровнять ядро по узлам (ставит новейшее, докладывает кому нужен ребут; НЕ гонять во время серии)
+	$(ANSIBLE) -i $(INVENTORY) playbooks/kernel.yml
+
+.PHONY: kernel-reboot
+kernel-reboot: ## ребут узлов с новым ядром по одному: make kernel-reboot LIMIT=<узел|группа>
+	@test -n "$(LIMIT)" || { echo "укажи узлы: make kernel-reboot LIMIT=<узел|группа>"; exit 1; }
+	$(ANSIBLE) -i $(INVENTORY) playbooks/kernel-reboot.yml --limit "$(LIMIT)" -e confirm=1
+
 .PHONY: cluster
 cluster: ## поднять k0s HA-кластер и записать ./kubeconfig
 	$(ANSIBLE) -i $(INVENTORY) playbooks/cluster.yml

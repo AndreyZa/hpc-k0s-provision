@@ -1,0 +1,41 @@
+---
+# Выравнивание ядра по узлам стенда (заведено 19.08.2026: bench-узлы жили
+# на 6.8.0-138, ss-system — на 6.8.0-136; разъезд копится от того, в какой
+# момент какую машину ставили и обновляли).
+#
+# Плейбук ставит НОВЕЙШЕЕ ядро серии (метапакет linux-generic) и ДОКЛАДЫВАЕТ,
+# кому нужен ребут. Сам НЕ ребутит — сознательно:
+#   - ребут bench-узлов допустим только между сериями (смена ядра — смена
+#     измерительной среды, фиксируется в провенансе кампании);
+#   - на ss-system живут ClickHouse/планировщик/Redis — момент выбирает
+#     оператор.
+# Ребут — отдельным явным шагом: make kernel-reboot LIMIT=<узел>.
+#
+# Гонять ТОЛЬКО когда серия не идёт: apt на измерительном узле — это IO и
+# кэш-шум ровно в тех счётчиках, которые стенд меряет.
+- name: Выровнять ядро по узлам
+  hosts: all
+  become: true
+  tasks:
+    - name: Установить новейшее ядро серии (linux-generic)
+      ansible.builtin.apt:
+        name: linux-generic
+        state: latest
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Сравнить работающее ядро с новейшим установленным
+      ansible.builtin.shell: |
+        set -o pipefail
+        latest=$(ls /boot/vmlinuz-* | sed 's|.*vmlinuz-||' | sort -V | tail -1)
+        running=$(uname -r)
+        if [ "$running" = "$latest" ]; then verdict="совпадает"; else verdict="НУЖЕН РЕБУТ"; fi
+        echo "running=$running latest=$latest [$verdict]"
+      args:
+        executable: /bin/bash
+      register: kernel_state
+      changed_when: false
+
+    - name: Итог по узлу
+      ansible.builtin.debug:
+        msg: "{{ kernel_state.stdout }}"

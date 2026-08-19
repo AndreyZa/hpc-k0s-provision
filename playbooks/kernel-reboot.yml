@@ -1,0 +1,31 @@
+---
+# Ребут узлов после kernel.yml — по одному (serial) и только с явными
+# --limit и confirm=1: случайный `ansible-playbook kernel-reboot.yml` не
+# должен уметь перезагрузить весь стенд. Обёртка: make kernel-reboot
+# LIMIT=<узел|группа>. Перед ребутом bench-узла убедиться, что серия не
+# идёт; k8s-узлы желательно cordon/drain руками, если на них есть поды
+# с состоянием (CH на ss-system).
+- name: Ребут узлов с новым ядром
+  hosts: all
+  become: true
+  serial: 1
+  tasks:
+    - name: Защита от случайного запуска
+      ansible.builtin.assert:
+        that:
+          - confirm | default('0') == '1'
+          - ansible_limit is defined
+        fail_msg: "нужны явные --limit <узлы> и -e confirm=1 (обёртка: make kernel-reboot LIMIT=...)"
+
+    - name: Ребут и ожидание возврата
+      ansible.builtin.reboot:
+        reboot_timeout: 900
+
+    - name: Ядро после ребута
+      ansible.builtin.command: uname -r
+      register: kernel_after
+      changed_when: false
+
+    - name: Итог
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }}: ядро {{ kernel_after.stdout }}"
