@@ -130,7 +130,7 @@ prep: ## OS-подготовка всех узлов (Ubuntu/perf/PSI/swap/вр�
 	$(ANSIBLE) -i $(INVENTORY) playbooks/prep.yml
 
 .PHONY: kernels
-kernels: ## подтянуть ядро ВМ к bench: make kernels [KERNEL=6.8.0-138] [LIMIT=...] (bench не трогает; докладывает кому нужен ребут)
+kernels: ## подтянуть ядро ВМ к пину bench (6.8.0-138 в плейбуке; KERNEL=... переопределяет, LIMIT=... сужает; bench не трогает)
 	$(ANSIBLE) -i $(INVENTORY) playbooks/kernel.yml \
 		$(if $(KERNEL),-e kernel_version=$(KERNEL)) \
 		$(if $(LIMIT),--limit "$(LIMIT)")
