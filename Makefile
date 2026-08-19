@@ -130,8 +130,10 @@ prep: ## OS-подготовка всех узлов (Ubuntu/perf/PSI/swap/вр�
 	$(ANSIBLE) -i $(INVENTORY) playbooks/prep.yml
 
 .PHONY: kernels
-kernels: ## выровнять ядро по узлам (ставит новейшее, докладывает кому нужен ребут; НЕ гонять во время серии)
-	$(ANSIBLE) -i $(INVENTORY) playbooks/kernel.yml
+kernels: ## подтянуть ядро ВМ к bench: make kernels [KERNEL=6.8.0-138] [LIMIT=...] (bench не трогает; докладывает кому нужен ребут)
+	$(ANSIBLE) -i $(INVENTORY) playbooks/kernel.yml \
+		$(if $(KERNEL),-e kernel_version=$(KERNEL)) \
+		$(if $(LIMIT),--limit "$(LIMIT)")
 
 .PHONY: kernel-reboot
 kernel-reboot: ## ребут узлов с новым ядром по одному: make kernel-reboot LIMIT=<узел|группа>
