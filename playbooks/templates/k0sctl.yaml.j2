@@ -14,6 +14,32 @@ spec:
       spec:
         telemetry:
           enabled: false
+        # --- Наблюдаемость control-plane -------------------------------------
+        #
+        # По умолчанию k0s держит метрики etcd, планировщика и
+        # controller-manager на localhost, поэтому Prometheus видел с этих ВМ
+        # ровно один компонент — apiserver. Метрик самого хранилища (fsync WAL,
+        # наличие лидера, размер БД) не было, хотя fsync диска под etcd стенд
+        # объявляет своим узким местом (playbooks/check.yml гоняет пробу dd).
+        #
+        # 0.0.0.0, а не адрес узла: конфиг у k0sctl ОДИН на все контроллеры,
+        # подставить туда разные адреса нечем. Отдаётся только телеметрия —
+        # доступа к данным etcd этот слушатель не даёт (клиентский порт 2379
+        # остаётся на localhost под TLS), а сеть стенда закрыта периметром.
+        storage:
+          type: etcd
+          etcd:
+            extraArgs:
+              listen-metrics-urls: http://0.0.0.0:2381
+        # Планировщик и controller-manager отдают /metrics по HTTPS с
+        # аутентификацией — Prometheus ходит туда своим токеном (RBAC на
+        # nonResourceURLs /metrics уже есть в bench-репе, k8s/monitoring).
+        scheduler:
+          extraArgs:
+            bind-address: 0.0.0.0
+        controllerManager:
+          extraArgs:
+            bind-address: 0.0.0.0
         # Внешнего LB перед API нет (см. README про честность HA), и без него
         # konnectivity-агенты видели ТОЛЬКО первый контроллер: на вводе прода
         # 18.08 все 4 агента сидели на cp-1, у cp-2/cp-3 — ноль туннелей.
