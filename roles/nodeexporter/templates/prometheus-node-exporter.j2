@@ -1,0 +1,7 @@
+# Управляется prod-provision (роль nodeexporter).
+# Слушаем адрес стендовой сети: Prometheus ходит статической целью
+# (bench-репо, k8s/monitoring/overlays/prod).
+#
+# systemd-коллектор включён намеренно: по нему видно состояние самого
+# k0scontroller (рестарты, падения) без захода на ВМ.
+ARGS="--web.listen-address={{ node_exporter_listen | default(ansible_host ~ ':9100') }} --collector.systemd --collector.systemd.unit-include=^(k0scontroller|prometheus-node-exporter|chrony)\\.service$"

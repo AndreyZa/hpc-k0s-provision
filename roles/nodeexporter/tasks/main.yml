@@ -1,0 +1,37 @@
+---
+# node_exporter на ВМ control-plane.
+#
+# Зачем отдельная роль, а не DaemonSet, как на остальных узлах: контроллеры k0s
+# работают БЕЗ kubelet (playbooks/templates/k0sctl.yaml.j2, role: controller) —
+# это не узлы Kubernetes, под на них не поставить, kubelet и cAdvisor их не
+# видят. До 18.08.2026 метрик этих трёх ВМ не было вообще: Prometheus собирал
+# только apiserver с них, то есть загрузку CPU, память и — главное — задержки
+# диска под etcd никто не наблюдал, хотя именно fsync etcd назван узким местом
+# стенда (playbooks/check.yml, проба dd).
+#
+# Пакет из репозитория дистрибутива, а не бинарь с GitHub: на стенде это
+# воспроизводимо без внешней сети, юнит и пользователь приезжают вместе с
+# пакетом, обновления идут штатным apt.
+- name: Установить node_exporter (пакет дистрибутива)
+  ansible.builtin.apt:
+    name: prometheus-node-exporter
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+# Слушать ТОЛЬКО адрес стендовой сети: по умолчанию пакет вешается на все
+# интерфейсы, а метрики узла отдаются без аутентификации.
+- name: Настроить адрес прослушивания и коллекторы
+  ansible.builtin.template:
+    src: prometheus-node-exporter.j2
+    dest: /etc/default/prometheus-node-exporter
+    mode: "0644"
+  notify: Restart node_exporter
+
+- name: Включить и запустить node_exporter
+  ansible.builtin.systemd_service:
+    name: prometheus-node-exporter
+    enabled: true
+    state: started
+    daemon_reload: true
+  when: not ansible_check_mode
