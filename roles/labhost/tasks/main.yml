@@ -24,11 +24,16 @@
 # --- аварийный своп ------------------------------------------------------
 # Не рабочая память, а буфер: даёт хосту дожить до срабатывания earlyoom
 # вместо мгновенного зависания в reclaim-трэше.
-- name: Создать swapfile
-  ansible.builtin.command:
-    cmd: "fallocate -l {{ labhost_swap_size }} {{ labhost_swap_path }}"
+# Создание и разметка — одной задачей под `creates`: mkswap отдельным шагом
+# пришлось бы гонять по «when: ... is changed», а это уже не идемпотентность,
+# а её имитация (и ansible-lint справедливо просит вынести такое в handler).
+- name: Создать и разметить swapfile
+  ansible.builtin.shell:
+    cmd: >-
+      fallocate -l {{ labhost_swap_size }} {{ labhost_swap_path }}
+      && chmod 600 {{ labhost_swap_path }}
+      && mkswap {{ labhost_swap_path }}
     creates: "{{ labhost_swap_path }}"
-  register: labhost_swap_created
 
 - name: Права на swapfile (иначе swapon откажется)
   ansible.builtin.file:
@@ -37,12 +42,8 @@
     group: root
     mode: "0600"
 
-- name: Разметить swapfile
-  ansible.builtin.command: "mkswap {{ labhost_swap_path }}"
-  when: labhost_swap_created is changed
-
 - name: Прописать своп в fstab
-  ansible.builtin.mount:
+  ansible.posix.mount:
     path: none
     src: "{{ labhost_swap_path }}"
     fstype: swap
@@ -61,16 +62,17 @@
 - name: Включить своп
   ansible.builtin.command: "swapon {{ labhost_swap_path }}"
   when: labhost_swap_path not in (labhost_swaps_active.stdout | default(''))
+  changed_when: true          # задача выполняется только когда свопа ещё нет
 
 # Своп на HDD: активный пейджинг зажевал бы и кластер, и страницу серии.
 - name: Свести пейджинг к аварийному (vm.swappiness)
-  ansible.builtin.copy:
-    dest: /etc/sysctl.d/99-swappiness.conf
-    mode: "0644"
-    content: |
-      # Аварийный буфер, не рабочая память: трогать своп только под давлением.
-      vm.swappiness = {{ labhost_swappiness }}
-  notify: перечитать sysctl
+  ansible.posix.sysctl:
+    name: vm.swappiness
+    value: "{{ labhost_swappiness | string }}"
+    sysctl_file: /etc/sysctl.d/99-swappiness.conf
+    sysctl_set: true
+    state: present
+    reload: true
 
 # --- kubelet и своп ------------------------------------------------------
 # КРИТИЧНО: у kubelet дефолт failSwapOn=true. Включённый своп без этой
@@ -86,7 +88,7 @@
       # failSwapOn=true не дал бы kubelet стартовать. Поды свопа не получают.
       ExecStart=
       ExecStart={{ labhost_k0s_bin }} controller {{ labhost_k0s_args }} --kubelet-extra-args=--fail-swap-on=false
-  notify: перезапустить k0scontroller
+  notify: Restart k0scontroller
 
 # --- посмертный след по памяти -------------------------------------------
 - name: Скрипт memwatch
@@ -103,7 +105,7 @@
   loop:
     - memwatch.service
     - memwatch.timer
-  notify: перечитать systemd
+  notify: Reload systemd
 
 - name: Включить memwatch
   ansible.builtin.systemd_service:
@@ -129,7 +131,7 @@
       # кластера и ssh — в списке неприкосновенных: без ssh машину не
       # спасти удалённо, а без k0s/containerd незачем и спасать.
       EARLYOOM_ARGS="-m {{ labhost_earlyoom_mem }} -s {{ labhost_earlyoom_swap }} -r 3600 --avoid '{{ labhost_earlyoom_avoid }}'"
-  notify: перезапустить earlyoom
+  notify: Restart earlyoom
 
 - name: Включить earlyoom
   ansible.builtin.systemd_service:
