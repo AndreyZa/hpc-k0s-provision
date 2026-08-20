@@ -21,6 +21,19 @@
   become: true
   vars:
     kernel_version: "6.8.0-138"   # эталон: ядро bench-узлов (снято 19.08.2026)
+    # Кандидаты в заморозку. Список НАМЕРЕННО шире реальности: на разных узлах
+    # стенда стоят разные метапакеты (bench — generic, ВМ гипервизора — минимальный
+    # образ вообще без linux-generic и linux-image-generic, из тройки есть только
+    # linux-headers-generic). Замораживается пересечение с установленным, иначе
+    # dpkg_selections падает на первом же отсутствующем — и плейбук не доходит до
+    # проверки версии (поймано 20.08.2026 на всех четырёх ВМ).
+    kernel_metapackages:
+      - linux-generic
+      - linux-image-generic
+      - linux-headers-generic
+      - linux-virtual
+      - linux-image-virtual
+      - linux-headers-virtual
   tasks:
     - name: Установить пиновую версию ядра
       ansible.builtin.apt:
@@ -31,14 +44,21 @@
         update_cache: true
         cache_valid_time: 3600
 
+    - name: Узнать, какие метапакеты вообще установлены
+      ansible.builtin.package_facts:
+        manager: apt
+
     - name: Заморозить метапакеты ядра (unattended-upgrades не двигает версию)
       ansible.builtin.dpkg_selections:
         name: "{{ item }}"
         selection: hold
-      loop:
-        - linux-generic
-        - linux-image-generic
-        - linux-headers-generic
+      loop: "{{ kernel_metapackages | select('in', ansible_facts.packages) | list }}"
+
+    - name: Что заморожено, а чего на узле нет
+      ansible.builtin.debug:
+        msg: >-
+          заморожено: {{ kernel_metapackages | select('in', ansible_facts.packages) | join(', ') | default('ничего', true) }}
+          | не установлено: {{ kernel_metapackages | reject('in', ansible_facts.packages) | join(', ') | default('—', true) }}
 
     - name: Сравнить работающее ядро с пином
       ansible.builtin.shell: |
