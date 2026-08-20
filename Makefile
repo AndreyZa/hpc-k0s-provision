@@ -129,6 +129,10 @@ dry-run: ## prep в режиме --check --diff — показать, что и�
 prep: ## OS-подготовка всех узлов (Ubuntu/perf/PSI/swap/время/governor)
 	$(ANSIBLE) -i $(INVENTORY) playbooks/prep.yml
 
+.PHONY: lab
+lab: ## Операторская машина (своп, memwatch, earlyoom, проверка маршрутов VPN)
+	$(ANSIBLE) -i $(INVENTORY) playbooks/lab.yml
+
 .PHONY: kernels
 kernels: ## подтянуть ядро ВМ к пину bench (6.8.0-138 в плейбуке; KERNEL=... переопределяет, LIMIT=... сужает; bench не трогает)
 	$(ANSIBLE) -i $(INVENTORY) playbooks/kernel.yml \

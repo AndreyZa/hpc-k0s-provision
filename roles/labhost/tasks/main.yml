@@ -1,0 +1,163 @@
+---
+# Лаб-хост — не измерительный узел, а ОПЕРАТОРСКАЯ машина: с неё гоняются
+# серии, на ней живут kubeconfig'и, VPN до стенда и статус-страница. В
+# инвентарь прода он не входит и в кластер стенда не включён, поэтому роль
+# отдельная и намеренно узкая: она чинит ровно те свойства, отсутствие
+# которых уже роняло кампанию.
+#
+# Повод (19–20.08.2026): хост замёрз посреди ночной серии, когда сторонний
+# процесс выбрал всю память. Свопа не было, OOM-киллер сработать не успел,
+# journald встал вместе со всеми — в журнале не осталось ни строчки о
+# виновнике, и серию пришлось перезапускать вслепую. Роль ставит три вещи:
+# аварийный своп, посмертный след по памяти и стража, убивающего едока до
+# того, как хост превратится в кирпич.
+
+- name: Проверить, что роль не поехала на измерительный узел
+  ansible.builtin.assert:
+    that: inventory_hostname not in (groups.get('bench', []) + groups.get('workers', []))
+    fail_msg: >-
+      labhost предназначена ТОЛЬКО для операторской машины. На узлах стенда
+      своп и earlyoom недопустимы: своп смазывает измерение времени, а
+      сторонний демон нарушает «на bench не работает ничего, кроме агента».
+    quiet: true
+
+# --- аварийный своп ------------------------------------------------------
+# Не рабочая память, а буфер: даёт хосту дожить до срабатывания earlyoom
+# вместо мгновенного зависания в reclaim-трэше.
+- name: Создать swapfile
+  ansible.builtin.command:
+    cmd: "fallocate -l {{ labhost_swap_size }} {{ labhost_swap_path }}"
+    creates: "{{ labhost_swap_path }}"
+  register: labhost_swap_created
+
+- name: Права на swapfile (иначе swapon откажется)
+  ansible.builtin.file:
+    path: "{{ labhost_swap_path }}"
+    owner: root
+    group: root
+    mode: "0600"
+
+- name: Разметить swapfile
+  ansible.builtin.command: "mkswap {{ labhost_swap_path }}"
+  when: labhost_swap_created is changed
+
+- name: Прописать своп в fstab
+  ansible.builtin.mount:
+    path: none
+    src: "{{ labhost_swap_path }}"
+    fstype: swap
+    opts: sw
+    state: present
+
+- name: Включить своп
+  ansible.builtin.command: "swapon {{ labhost_swap_path }}"
+  register: labhost_swapon
+  changed_when: labhost_swapon.rc == 0
+  failed_when: labhost_swapon.rc != 0 and 'already' not in (labhost_swapon.stderr | lower)
+
+# Своп на HDD: активный пейджинг зажевал бы и кластер, и страницу серии.
+- name: Свести пейджинг к аварийному (vm.swappiness)
+  ansible.builtin.copy:
+    dest: /etc/sysctl.d/99-swappiness.conf
+    mode: "0644"
+    content: |
+      # Аварийный буфер, не рабочая память: трогать своп только под давлением.
+      vm.swappiness = {{ labhost_swappiness }}
+  notify: перечитать sysctl
+
+# --- kubelet и своп ------------------------------------------------------
+# КРИТИЧНО: у kubelet дефолт failSwapOn=true. Включённый своп без этой
+# правки означает, что при следующей перезагрузке kubelet не стартует и
+# кластер лаборатории не поднимется. Поды свопа при этом не получают.
+- name: Разрешить kubelet стартовать при включённом свопе
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/k0scontroller.service.d/kubelet-swap.conf
+    mode: "0644"
+    content: |
+      [Service]
+      # См. роль labhost: на хосте включён аварийный своп, а дефолтный
+      # failSwapOn=true не дал бы kubelet стартовать. Поды свопа не получают.
+      ExecStart=
+      ExecStart={{ labhost_k0s_bin }} controller {{ labhost_k0s_args }} --kubelet-extra-args=--fail-swap-on=false
+  notify: перезапустить k0scontroller
+
+# --- посмертный след по памяти -------------------------------------------
+- name: Скрипт memwatch
+  ansible.builtin.copy:
+    src: memwatch.sh
+    dest: /usr/local/sbin/memwatch.sh
+    mode: "0755"
+
+- name: Юниты memwatch
+  ansible.builtin.copy:
+    src: "{{ item }}"
+    dest: "/etc/systemd/system/{{ item }}"
+    mode: "0644"
+  loop:
+    - memwatch.service
+    - memwatch.timer
+  notify: перечитать systemd
+
+- name: Включить memwatch
+  ansible.builtin.systemd_service:
+    name: memwatch.timer
+    enabled: true
+    state: started
+    daemon_reload: true
+
+# --- страж памяти --------------------------------------------------------
+- name: Поставить earlyoom
+  ansible.builtin.apt:
+    name: earlyoom
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Настроить earlyoom
+  ansible.builtin.copy:
+    dest: /etc/default/earlyoom
+    mode: "0644"
+    content: |
+      # Убить крупнейшего едока, пока хост ещё отвечает. Инфраструктура
+      # кластера и ssh — в списке неприкосновенных: без ssh машину не
+      # спасти удалённо, а без k0s/containerd незачем и спасать.
+      EARLYOOM_ARGS="-m {{ labhost_earlyoom_mem }} -s {{ labhost_earlyoom_swap }} -r 3600 --avoid '{{ labhost_earlyoom_avoid }}'"
+  notify: перезапустить earlyoom
+
+- name: Включить earlyoom
+  ansible.builtin.systemd_service:
+    name: earlyoom
+    enabled: true
+    state: started
+
+# --- журнал --------------------------------------------------------------
+- name: Ограничить размер журнала
+  ansible.builtin.copy:
+    dest: /etc/systemd/journald.conf.d/99-cap.conf
+    mode: "0644"
+    content: |
+      [Journal]
+      # Гигабайты журнала на операторской машине не нужны; потолок
+      # применяется при ротации.
+      SystemMaxUse={{ labhost_journal_max }}
+
+# --- VPN до стенда -------------------------------------------------------
+# Конфиг WG не шаблонизируется: в нём приватный ключ, которого в репозитории
+# быть не должно. Роль лишь ПРОВЕРЯЕТ, что маршруты до iDRAC и PDU на месте —
+# без них энергетическая ветка молча остаётся без данных.
+- name: Прочитать AllowedIPs текущего конфига WG
+  ansible.builtin.slurp:
+    src: "{{ labhost_wg_conf }}"
+  register: labhost_wg_raw
+  failed_when: false
+
+- name: Проверить, что адреса стенда прописаны в туннеле
+  ansible.builtin.assert:
+    that: labhost_wg_required_ips | reject('in', labhost_wg_raw.content | default('') | b64decode) | list | length == 0
+    fail_msg: >-
+      В {{ labhost_wg_conf }} не хватает адресов:
+      {{ labhost_wg_required_ips | reject('in', labhost_wg_raw.content | default('') | b64decode) | list | join(', ') }}.
+      Добавить в AllowedIPs пира и перезапустить wg-quick. ВНИМАНИЕ: одной
+      нашей стороны мало — доступ открывает и партнёр у себя.
+    quiet: true
+  when: labhost_wg_raw.content is defined

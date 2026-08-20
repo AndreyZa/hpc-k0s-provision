@@ -1,0 +1,6 @@
+[Unit]
+Description=memwatch: журнал памяти и топ-едоков RSS
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/memwatch.sh

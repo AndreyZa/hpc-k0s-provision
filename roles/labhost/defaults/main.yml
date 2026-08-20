@@ -1,0 +1,31 @@
+---
+# Аварийный своп. Размер выбран от объёма ОЗУ хоста (6.2 ГиБ): буфера в 8 ГБ
+# хватает, чтобы пережить одного крупного едока, а не чтобы работать в свопе.
+labhost_swap_path: /swapfile
+labhost_swap_size: 8G
+labhost_swappiness: 10
+
+# Строка запуска k0s на операторской машине. Однонодовый контроллер: лаба —
+# полигон для тестов плагина и харнесса, а не кластер стенда.
+labhost_k0s_bin: /usr/local/bin/k0s
+labhost_k0s_args: --single=true
+
+# earlyoom: порог в процентах свободной памяти и свободного свопа.
+labhost_earlyoom_mem: 5
+labhost_earlyoom_swap: 75
+# Неприкосновенные: без ssh машину не спасти удалённо, без k0s/containerd
+# нечего спасать, clickhouse держит точку правды по числам кампаний.
+labhost_earlyoom_avoid: '^(k0s|kubelet|containerd|kine|sshd|systemd|clickhouse-serv)$'
+
+labhost_journal_max: 500M
+
+# VPN до стенда. Конфиг с приватным ключом в репозитории не хранится — роль
+# только проверяет, что маршруты на месте. iDRAC нужны поллеру мощности,
+# PDU — энергетической ветке (обе AP8853 подключены 20.08.2026).
+labhost_wg_conf: /etc/wireguard/wg0.conf
+labhost_wg_required_ips:
+  - 10.21.200.106
+  - 10.21.200.107
+  - 10.21.200.108
+  - 10.21.200.246
+  - 10.21.200.247
