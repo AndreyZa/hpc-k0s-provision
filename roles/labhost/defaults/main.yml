@@ -29,3 +29,23 @@ labhost_wg_required_ips:
   - 10.21.200.108
   - 10.21.200.246
   - 10.21.200.247
+
+# Службы, ненужные на операторской машине. ОБНОВЛЕНИЯ СЮДА НЕ ВНОСИТЬ:
+# apt-daily, unattended-upgrades, snap refresh и canonical-livepatch
+# оставлены включёнными осознанно (решение оператора 20.08.2026).
+labhost_disable_units:
+  - cups.service
+  - cups.socket
+  - cups.path
+  - cups-browsed.service
+  - avahi-daemon.service
+  - avahi-daemon.socket
+  - bluetooth.service
+  - ModemManager.service
+  - colord.service
+  - switcheroo-control.service
+  - docker.service
+  - docker.socket
+  - AmneziaVPN.service
+  - whoopsie.service
+  - whoopsie.path
