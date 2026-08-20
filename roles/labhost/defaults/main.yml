@@ -42,10 +42,13 @@ labhost_disable_units:
   - avahi-daemon.socket
   - bluetooth.service
   - ModemManager.service
-  - colord.service
   - switcheroo-control.service
   - docker.service
   - docker.socket
   - AmneziaVPN.service
-  - whoopsie.service
+  # У whoopsie гасится ПУТЬ, а не сам сервис: сервис static (без секции
+  # [Install]), «выключить» его нельзя — systemd поднимает его по
+  # whoopsie.path. По той же причине в списке нет colord.service: он static
+  # и стартует по требованию из графической сессии. Попытка их отключать
+  # давала вечный changed на каждом прогоне роли (20.08.2026).
   - whoopsie.path
