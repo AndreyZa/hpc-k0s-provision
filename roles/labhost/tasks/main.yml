@@ -49,11 +49,18 @@
     opts: sw
     state: present
 
+# Идемпотентность через ФАКТ, а не через разбор текста ошибки: повторный
+# swapon на включённом файле отвечает «Device or resource busy», и попытка
+# отличать это по подстроке уже дала ложное падение (20.08.2026).
+- name: Узнать, какие свопы уже включены
+  ansible.builtin.command: swapon --noheadings --show=NAME
+  register: labhost_swaps_active
+  changed_when: false
+  failed_when: false
+
 - name: Включить своп
   ansible.builtin.command: "swapon {{ labhost_swap_path }}"
-  register: labhost_swapon
-  changed_when: labhost_swapon.rc == 0
-  failed_when: labhost_swapon.rc != 0 and 'already' not in (labhost_swapon.stderr | lower)
+  when: labhost_swap_path not in (labhost_swaps_active.stdout | default(''))
 
 # Своп на HDD: активный пейджинг зажевал бы и кластер, и страницу серии.
 - name: Свести пейджинг к аварийному (vm.swappiness)
